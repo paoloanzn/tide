@@ -5,7 +5,9 @@
 // The full language semantics are documented in README.md.
 #pragma once
 
+#include <array>
 #include <deque>
+#include <iterator>
 #include <filesystem>
 #include <map>
 #include <memory>
@@ -30,10 +32,16 @@ enum class TypeKind {
 // Integer refinements used by annotations and schemas. Values are always
 // 128-bit at runtime; a refined slot is range-checked on store/serialize.
 enum class IntWidth { any, u8, u16, u32, u64, u128, i8, i16, i32, i64, i128 };
+inline constexpr IntWidth all_int_widths[] = {IntWidth::any, IntWidth::u8,  IntWidth::u16, IntWidth::u32,
+                                              IntWidth::u64, IntWidth::u128, IntWidth::i8,  IntWidth::i16,
+                                              IntWidth::i32, IntWidth::i64, IntWidth::i128};
+static_assert(std::size(all_int_widths) == static_cast<std::size_t>(IntWidth::i128) + 1,
+              "all_int_widths must list every IntWidth");
 
 struct Type {
     TypeKind kind = TypeKind::error;
-    IntWidth width = IntWidth::any;                          // int_; float_ uses u32 for f32
+    IntWidth width = IntWidth::any;                          // int_ only
+    bool is_f32 = false;                                     // float_: 32-bit in schemas (f64 otherwise)
     const Type* elem = nullptr;                              // list, option
     std::optional<std::uint64_t> fixed_len;                  // list from `[T; N]`
     std::vector<std::pair<std::string, const Type*>> fields; // record (ordered)
@@ -61,7 +69,7 @@ public:
     const Type* void_() const { return void_t_; }
     const Type* null() const { return null_; }
     const Type* bool_() const { return bool_t_; }
-    const Type* int_(IntWidth w = IntWidth::any) const { return ints_[static_cast<int>(w)]; }
+    const Type* int_(IntWidth w = IntWidth::any) const { return ints_[static_cast<std::size_t>(w)]; }
     const Type* float_() const { return float_t_; }
     const Type* float32() const { return float32_; }
     const Type* string() const { return string_; }
@@ -87,10 +95,13 @@ private:
     std::deque<Type> arena_;
     const Type *error_, *any_, *float32_, *void_t_, *null_, *bool_t_, *float_t_, *string_, *bytes_, *duration_, *pubkey_,
         *keypair_, *source_, *range_, *meta_, *account_info_, *tx_result_;
-    const Type* ints_[11];
+    std::array<const Type*, std::size(all_int_widths)> ints_{};
 };
 
 // -------------------------------------------------------------- symbols --
+
+// Binary format of a `schema ... using <format>` declaration.
+enum class SchemaFormat { borsh, anchor };
 
 enum class SymbolKind { variable, keypair, source, function, schema, module, parameter, loop_var, tx_binding };
 
@@ -110,7 +121,7 @@ struct Symbol {
     const Type* return_type = nullptr;
     // schema
     const ast::SchemaDecl* schema = nullptr;
-    std::string schema_format;            // "borsh" | "anchor"
+    SchemaFormat schema_format = SchemaFormat::borsh;
     const Type* schema_record = nullptr;  // record type of values described by the schema
     // module
     const Module* module = nullptr;

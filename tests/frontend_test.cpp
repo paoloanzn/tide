@@ -98,6 +98,12 @@ TEST_CASE("syntax errors carry precise positions", "[parser]") {
     auto c = compile("keypair a = seed(\"a\")\nnetwork n { }\n");
     CHECK(c->has("expected ';'", 1));
     CHECK(compile("let account = 5;")->has("'account' is a reserved keyword"));
+    // Both ends of the reserved list, and a contextual keyword that stays usable.
+    CHECK(compile("let import = 5;")->has("'import' is a reserved keyword"));
+    CHECK(compile("let extension = 5;")->has("'extension' is a reserved keyword"));
+    CHECK(compile("let slot = 5;")->ok());
+    CHECK(is_reserved_keyword("extension"));
+    CHECK_FALSE(is_reserved_keyword("slot"));
     CHECK(compile("let s = \"abc\n\";")->has("unterminated string literal"));
     CHECK(compile("let r = 1..2..3;")->has("operator cannot be chained"));
     CHECK(compile("account x { }")->has("expected a declaration"));

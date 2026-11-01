@@ -27,6 +27,24 @@ namespace tide::backend {
 using Json = nlohmann::json;
 namespace fs = std::filesystem;
 
+// solana-test-validator defaults and the waits Tide applies around it.
+constexpr std::uint16_t default_rpc_port = 8899;
+constexpr std::uint16_t default_faucet_port = 9900;
+constexpr std::int64_t default_startup_timeout_ms = 120'000;
+constexpr auto rpc_request_timeout = std::chrono::milliseconds(30'000);
+constexpr auto health_request_timeout = std::chrono::milliseconds(2'000);
+constexpr auto health_poll_interval = std::chrono::milliseconds(500);
+constexpr auto slot_poll_interval = std::chrono::milliseconds(400);
+constexpr auto confirm_poll_interval = std::chrono::milliseconds(300);
+constexpr auto process_poll_interval = std::chrono::milliseconds(100);
+constexpr auto finalize_timeout = std::chrono::seconds(90);
+// Grace periods before a stop escalates to SIGKILL.
+constexpr auto graceful_stop_timeout = std::chrono::seconds(30);  // bootstrap instance: flush the ledger
+constexpr auto down_stop_timeout = std::chrono::seconds(20);      // `tide down`
+constexpr auto abort_stop_timeout = std::chrono::seconds(10);     // teardown after an error
+
+fs::path default_state_root(const fs::path& script_dir) { return script_dir / ".tide"; }
+
 namespace {
 
 [[noreturn]] void fail(Loc loc, const std::string& msg) { throw TideError(loc, msg); }
@@ -115,7 +133,7 @@ void stop_process(pid_t pid, int sig, std::chrono::milliseconds timeout) {
         int status = 0;
         pid_t r = ::waitpid(pid, &status, WNOHANG);
         if (r == pid || (r < 0 && errno == ECHILD && !process_alive(pid))) return;
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        std::this_thread::sleep_for(process_poll_interval);
     }
     ::kill(pid, SIGKILL);
     ::waitpid(pid, nullptr, 0);
@@ -142,17 +160,33 @@ struct RpcError : std::runtime_error {
     RpcError(const std::string& msg, Json d) : std::runtime_error(msg), data(std::move(d)) {}
 };
 
-class RpcClient final : public RuntimeClient {
+std::optional<AccountView> parse_account(const Pubkey& address, const Json& v) {
+    if (v.is_null()) return std::nullopt;
+    AccountView a;
+    a.address = address;
+    a.lamports = v["lamports"].get<std::uint64_t>();
+    a.owner = sol::pubkey_const(v["owner"].get<std::string>());
+    a.executable = v["executable"].get<bool>();
+    a.rent_epoch = v["rentEpoch"].is_number_unsigned() ? v["rentEpoch"].get<std::uint64_t>() : UINT64_MAX;
+    auto data = sol::base64_decode(v["data"][0].get<std::string>());
+    if (!data) throw std::runtime_error("RPC returned undecodable account data");
+    a.data = std::move(*data);
+    return a;
+}
+
+// JSON-RPC 2.0 transport to one Solana RPC endpoint (local or remote).
+class JsonRpc {
 public:
-    RpcClient(std::string url, std::int64_t confirm_timeout_ms, std::string solana_cli, fs::path keys_dir)
-        : url_(std::move(url)), confirm_timeout_ms_(confirm_timeout_ms), solana_cli_(std::move(solana_cli)), keys_dir_(std::move(keys_dir)) {}
+    explicit JsonRpc(std::string url) : url_(std::move(url)) {}
 
     const std::string& url() const { return url_; }
 
+    // Returns `result`; throws RpcError for a JSON-RPC error and TideError for
+    // transport failures.
     Json call(const std::string& method, Json params, Loc origin = {}) {
         Json req = {{"jsonrpc", "2.0"}, {"id", ++id_}, {"method", method}, {"params", std::move(params)}};
         cpr::Response r = cpr::Post(cpr::Url{url_}, cpr::Header{{"Content-Type", "application/json"}}, cpr::Body{req.dump()},
-                                    cpr::Timeout{30000});
+                                    cpr::Timeout{rpc_request_timeout});
         if (r.error) fail(origin, "RPC request '" + method + "' to " + url_ + " failed: " + r.error.message);
         Json body = Json::parse(r.text, nullptr, false);
         if (body.is_discarded()) fail(origin, "RPC '" + method + "' returned invalid JSON (HTTP " + std::to_string(r.status_code) + ")");
@@ -161,13 +195,35 @@ public:
         return body["result"];
     }
 
+    // Short-timeout probe used while a validator starts.
     bool healthy() {
         cpr::Response r = cpr::Post(cpr::Url{url_}, cpr::Header{{"Content-Type", "application/json"}},
-                                    cpr::Body{R"({"jsonrpc":"2.0","id":1,"method":"getHealth"})"}, cpr::Timeout{2000});
+                                    cpr::Body{R"({"jsonrpc":"2.0","id":1,"method":"getHealth"})"}, cpr::Timeout{health_request_timeout});
         if (r.error || r.status_code != 200) return false;
         Json body = Json::parse(r.text, nullptr, false);
         return !body.is_discarded() && body.value("result", "") == "ok";
     }
+
+    std::optional<AccountView> account(const Pubkey& address, Loc origin = {}) {
+        Json r = call("getAccountInfo", {address.base58(), {{"encoding", "base64"}, {"commitment", "confirmed"}}}, origin);
+        return parse_account(address, r["value"]);
+    }
+
+    std::uint64_t slot(const char* commitment) { return call("getSlot", {{{"commitment", commitment}}}).get<std::uint64_t>(); }
+
+private:
+    std::string url_;
+    std::uint64_t id_ = 0;
+};
+
+// The RuntimeClient used for bootstrap and scenarios: transactions, airdrops,
+// deploys (through the solana CLI) and state queries over JSON-RPC.
+class RpcRuntime final : public RuntimeClient {
+public:
+    RpcRuntime(std::string url, std::int64_t confirm_timeout_ms, std::string solana_cli, fs::path keys_dir)
+        : rpc_(std::move(url)), confirm_timeout_ms_(confirm_timeout_ms), solana_cli_(std::move(solana_cli)), keys_dir_(std::move(keys_dir)) {}
+
+    JsonRpc& rpc() { return rpc_; }
 
     TxResult send_transaction(const TransactionRequest& req) override {
         std::vector<sol::Instruction> ixs;
@@ -180,16 +236,18 @@ public:
         } catch (const std::invalid_argument& e) {
             fail(req.origin, std::string("cannot build transaction: ") + e.what());
         }
-        if (tx.size() > 1232) fail(req.origin, "transaction is " + std::to_string(tx.size()) + " bytes; the maximum is 1232");
+        if (tx.size() > sol::max_transaction_size)
+            fail(req.origin, "transaction is " + std::to_string(tx.size()) + " bytes; the maximum is " +
+                                 std::to_string(sol::max_transaction_size));
         return submit(sol::base64_encode(tx), req.origin);
     }
 
     TxResult airdrop(const Pubkey& to, std::uint64_t lamports, Loc origin) override {
         try {
-            std::string sig = call("requestAirdrop", {to.base58(), lamports, {{"commitment", "confirmed"}}}, origin).get<std::string>();
+            std::string sig = rpc_.call("requestAirdrop", {to.base58(), lamports, {{"commitment", "confirmed"}}}, origin).get<std::string>();
             return confirm(sig, origin);
         } catch (const RpcError& e) {
-            return {false, "", e.what(), {}, 0};
+            return TxResult{.error = e.what()};
         }
     }
 
@@ -206,43 +264,24 @@ public:
         auto acc = account(payer.pubkey);
         if (!acc || acc->lamports < need) {
             TxResult r = airdrop(payer.pubkey, need, req.origin);
-            if (!r.success) return {false, "", "funding the deployer failed: " + r.error, {}, 0};
+            if (!r.success) return TxResult{.error = "funding the deployer failed: " + r.error};
         }
         int code = 0;
-        std::string out = run_capture({solana_cli_, "program", "deploy", "--url", url_, "--keypair", payer_file.string(),
+        std::string out = run_capture({solana_cli_, "program", "deploy", "--url", rpc_.url(), "--keypair", payer_file.string(),
                                        "--program-id", program_file.string(), "--commitment", "confirmed",
                                        req.binary.string()},
                                       code);
-        if (code != 0) return {false, "", "solana program deploy failed:\n" + out, {}, 0};
-        return {true, "", "", {}, 0};
+        if (code != 0) return TxResult{.error = "solana program deploy failed:\n" + out};
+        return TxResult{.success = true};
     }
 
-    std::optional<AccountView> account(const Pubkey& address) override {
-        Json r = call("getAccountInfo", {address.base58(), {{"encoding", "base64"}, {"commitment", "confirmed"}}});
-        return parse_account(address, r["value"]);
-    }
-
-    std::uint64_t slot() override { return slot_at("confirmed"); }
-    std::uint64_t slot_at(const char* commitment) { return call("getSlot", {{{"commitment", commitment}}}).get<std::uint64_t>(); }
-    std::uint64_t epoch() override { return call("getEpochInfo", {{{"commitment", "confirmed"}}})["epoch"].get<std::uint64_t>(); }
-
-    static std::optional<AccountView> parse_account(const Pubkey& address, const Json& v) {
-        if (v.is_null()) return std::nullopt;
-        AccountView a;
-        a.address = address;
-        a.lamports = v["lamports"].get<std::uint64_t>();
-        a.owner = sol::pubkey_const(v["owner"].get<std::string>());
-        a.executable = v["executable"].get<bool>();
-        a.rent_epoch = v["rentEpoch"].is_number_unsigned() ? v["rentEpoch"].get<std::uint64_t>() : UINT64_MAX;
-        auto data = sol::base64_decode(v["data"][0].get<std::string>());
-        if (!data) throw std::runtime_error("RPC returned undecodable account data");
-        a.data = std::move(*data);
-        return a;
-    }
+    std::optional<AccountView> account(const Pubkey& address) override { return rpc_.account(address); }
+    std::uint64_t slot() override { return rpc_.slot("confirmed"); }
+    std::uint64_t epoch() override { return rpc_.call("getEpochInfo", {{{"commitment", "confirmed"}}})["epoch"].get<std::uint64_t>(); }
 
 private:
     sol::Hash latest_blockhash(Loc origin) {
-        Json r = call("getLatestBlockhash", {{{"commitment", "confirmed"}}}, origin);
+        Json r = rpc_.call("getLatestBlockhash", {{{"commitment", "confirmed"}}}, origin);
         auto bytes = sol::base58_decode(r["value"]["blockhash"].get<std::string>());
         if (!bytes || bytes->size() != 32) fail(origin, "RPC returned an invalid blockhash");
         sol::Hash h{};
@@ -253,10 +292,10 @@ private:
     TxResult submit(const std::string& tx_b64, Loc origin) {
         std::string sig;
         try {
-            sig = call("sendTransaction", {tx_b64, {{"encoding", "base64"}, {"preflightCommitment", "confirmed"}}}, origin)
+            sig = rpc_.call("sendTransaction", {tx_b64, {{"encoding", "base64"}, {"preflightCommitment", "confirmed"}}}, origin)
                       .get<std::string>();
         } catch (const RpcError& e) {
-            TxResult r{false, "", e.what(), {}, 0};
+            TxResult r{.error = e.what()};
             if (e.data.is_object() && e.data.contains("logs") && e.data["logs"].is_array())
                 for (const auto& l : e.data["logs"]) r.logs.push_back(l.get<std::string>());
             return r;
@@ -267,24 +306,25 @@ private:
     TxResult confirm(const std::string& sig, Loc origin) {
         auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(confirm_timeout_ms_);
         while (std::chrono::steady_clock::now() < deadline) {
-            Json r = call("getSignatureStatuses", {Json::array({sig}), {{"searchTransactionHistory", false}}}, origin);
+            Json r = rpc_.call("getSignatureStatuses", {Json::array({sig}), {{"searchTransactionHistory", false}}}, origin);
             const Json& st = r["value"][0];
             if (!st.is_null()) {
                 std::string level = st.value("confirmationStatus", "");
                 if (level == "confirmed" || level == "finalized") {
-                    TxResult res{st["err"].is_null(), sig, st["err"].is_null() ? "" : st["err"].dump(), {}, st.value("slot", 0ull)};
+                    bool ok = st["err"].is_null();
+                    TxResult res{.success = ok, .signature = sig, .error = ok ? "" : st["err"].dump(), .slot = st.value("slot", 0ull)};
                     fetch_logs(res, origin);
                     return res;
                 }
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(300));
+            std::this_thread::sleep_for(confirm_poll_interval);
         }
-        return {false, sig, "transaction was not confirmed within " + std::to_string(confirm_timeout_ms_) + "ms", {}, 0};
+        return TxResult{.signature = sig, .error = "transaction was not confirmed within " + std::to_string(confirm_timeout_ms_) + "ms"};
     }
 
     void fetch_logs(TxResult& res, Loc origin) {
         try {
-            Json t = call("getTransaction", {res.signature, {{"encoding", "json"}, {"commitment", "confirmed"}, {"maxSupportedTransactionVersion", 0}}}, origin);
+            Json t = rpc_.call("getTransaction", {res.signature, {{"encoding", "json"}, {"commitment", "confirmed"}, {"maxSupportedTransactionVersion", 0}}}, origin);
             if (t.is_object() && t.contains("meta") && t["meta"].contains("logMessages") && t["meta"]["logMessages"].is_array())
                 for (const auto& l : t["meta"]["logMessages"]) res.logs.push_back(l.get<std::string>());
         } catch (const std::exception&) {
@@ -292,19 +332,16 @@ private:
         }
     }
 
-    std::string url_;
+    JsonRpc rpc_;
     std::int64_t confirm_timeout_ms_;
     std::string solana_cli_;
     fs::path keys_dir_;
-    std::uint64_t id_ = 0;
 };
 
 // Fetches an account from an arbitrary cluster (used for clones).
 std::optional<AccountView> fetch_remote_account(const std::string& url, const Pubkey& address, Loc origin) {
-    RpcClient client(url, 30'000, "", {});
     try {
-        Json r = client.call("getAccountInfo", {address.base58(), {{"encoding", "base64"}, {"commitment", "confirmed"}}}, origin);
-        return RpcClient::parse_account(address, r["value"]);
+        return JsonRpc(url).account(address, origin);
     } catch (const RpcError& e) {
         fail(origin, "fetching " + address.base58() + " from " + url + " failed: " + e.what());
     }
@@ -422,14 +459,36 @@ public:
         return std::nullopt;
     }
 
+    // Accounts to preload, keyed by address, with the construct that added each.
+    const std::map<Pubkey, std::pair<AccountView, Loc>>& accounts() const { return accounts_; }
+    std::size_t program_count() const { return programs_.size(); }
+
+    // Validator flags for everything genesis decided besides plain accounts.
+    // Sysvar settings take precedence over the equivalent network options.
+    void append_ledger_flags(std::vector<std::string>& a, const NetworkConfig& cfg) const {
+        auto spe = slots_per_epoch_ ? slots_per_epoch_ : cfg.slots_per_epoch;
+        if (spe) a.insert(a.end(), {"--slots-per-epoch", std::to_string(*spe)});
+        if (cfg.ticks_per_slot) a.insert(a.end(), {"--ticks-per-slot", std::to_string(*cfg.ticks_per_slot)});
+        auto warp = warp_slot_ ? warp_slot_ : cfg.warp_slot;
+        if (warp) a.insert(a.end(), {"--warp-slot", std::to_string(*warp)});
+        if (fork_url_) a.insert(a.end(), {"--url", *fork_url_, "--clone-feature-set"});
+        for (const auto& [f, _] : deactivated_) a.insert(a.end(), {"--deactivate-feature", f.base58()});
+        for (const auto& p : programs_) {
+            if (p.loader == sol::ids::bpf_upgradeable_loader)
+                a.insert(a.end(), {"--upgradeable-program", p.id.base58(), p.binary.string(),
+                                   p.upgrade_authority ? p.upgrade_authority->base58() : "none"});
+            else
+                a.insert(a.end(), {"--bpf-program", p.id.base58(), p.binary.string()});
+        }
+    }
+
+private:
+    Diagnostics& diags_;
     std::map<Pubkey, std::pair<AccountView, Loc>> accounts_;
     std::vector<ProgramSpec> programs_;
     std::map<Pubkey, Loc> deactivated_;
     std::optional<std::uint64_t> warp_slot_, slots_per_epoch_;
     std::optional<std::string> fork_url_;
-
-private:
-    Diagnostics& diags_;
 };
 
 }  // namespace
@@ -443,14 +502,14 @@ struct SolanaTestValidatorBackend::Impl {
     NetworkConfig cfg;
     Genesis gen;
     fs::path state_dir, ledger_dir, accounts_dir, keys_dir, log_file;
-    std::uint16_t rpc_port = 8899;
+    std::uint16_t rpc_port = default_rpc_port;
     std::string bind_host = "127.0.0.1";
     pid_t bootstrap_pid = -1, network_pid = -1;
     bool ledger_initialized = false;  // the ledger already contains genesis (+ bootstrap)
     bool files_written = false;
     bool detached = false;
     std::optional<std::uint64_t> persisted_slot;  // last bootstrap slot, finalized before shutdown
-    std::unique_ptr<RpcClient> client;
+    std::unique_ptr<RpcRuntime> client;
 
     Impl(SolanaBackendOptions o, Diagnostics& d, std::ostream& l) : opts(std::move(o)), diags(d), log(l), gen(d) {}
 
@@ -462,6 +521,10 @@ struct SolanaTestValidatorBackend::Impl {
 
     std::string rpc_url() const { return "http://" + bind_host + ":" + std::to_string(rpc_port); }
 
+    std::chrono::milliseconds startup_timeout() const {
+        return std::chrono::milliseconds(cfg.startup_timeout_ms.value_or(default_startup_timeout_ms));
+    }
+
     void configure(const NetworkConfig& c) {
         cfg = c;
         if (cfg.validators.size() > 1) {
@@ -470,7 +533,7 @@ struct SolanaTestValidatorBackend::Impl {
             err.notes.push_back({cfg.validators[0].origin, "first validator is declared here"});
             throw err;
         }
-        fs::path root = opts.state_root.empty() ? cfg.base_dir / ".tide" : opts.state_root;
+        fs::path root = opts.state_root.empty() ? default_state_root(cfg.base_dir) : opts.state_root;
         state_dir = root / cfg.name;
         ledger_dir = cfg.ledger ? (fs::path(*cfg.ledger).is_absolute() ? fs::path(*cfg.ledger) : cfg.base_dir / *cfg.ledger)
                                 : state_dir / "ledger";
@@ -499,8 +562,8 @@ struct SolanaTestValidatorBackend::Impl {
             }
         };
         const ValidatorConfig* v = cfg.validators.empty() ? nullptr : &cfg.validators[0];
-        check_port(v ? v->rpc_port : std::nullopt, 8899, "RPC port");
-        check_port(v ? v->faucet_port : std::nullopt, 9900, "faucet port");
+        check_port(v ? v->rpc_port : std::nullopt, default_rpc_port, "RPC port");
+        check_port(v ? v->faucet_port : std::nullopt, default_faucet_port, "faucet port");
     }
 
     std::optional<pid_t> read_pid() const {
@@ -518,7 +581,7 @@ struct SolanaTestValidatorBackend::Impl {
         fs::create_directories(state_dir);
         fs::remove_all(accounts_dir);
         fs::create_directories(accounts_dir);
-        for (const auto& [addr, entry] : gen.accounts_) {
+        for (const auto& [addr, entry] : gen.accounts()) {
             const AccountView& a = entry.first;
             Json j = {{"pubkey", addr.base58()},
                       {"account",
@@ -555,21 +618,19 @@ struct SolanaTestValidatorBackend::Impl {
     // Flags that only take effect when the ledger is created.
     std::vector<std::string> genesis_args() const {
         std::vector<std::string> a = {"--reset", "--account-dir", accounts_dir.string()};
-        auto spe = gen.slots_per_epoch_ ? gen.slots_per_epoch_ : cfg.slots_per_epoch;
-        if (spe) a.insert(a.end(), {"--slots-per-epoch", std::to_string(*spe)});
-        if (cfg.ticks_per_slot) a.insert(a.end(), {"--ticks-per-slot", std::to_string(*cfg.ticks_per_slot)});
-        auto warp = gen.warp_slot_ ? gen.warp_slot_ : cfg.warp_slot;
-        if (warp) a.insert(a.end(), {"--warp-slot", std::to_string(*warp)});
-        if (gen.fork_url_) a.insert(a.end(), {"--url", *gen.fork_url_, "--clone-feature-set"});
-        for (const auto& [f, _] : gen.deactivated_) a.insert(a.end(), {"--deactivate-feature", f.base58()});
-        for (const auto& p : gen.programs_) {
-            if (p.loader == sol::ids::bpf_upgradeable_loader)
-                a.insert(a.end(), {"--upgradeable-program", p.id.base58(), p.binary.string(),
-                                   p.upgrade_authority ? p.upgrade_authority->base58() : "none"});
-            else
-                a.insert(a.end(), {"--bpf-program", p.id.base58(), p.binary.string()});
-        }
+        gen.append_ledger_flags(a, cfg);
         return a;
+    }
+
+    // Full command line. Genesis flags only take effect when the ledger is
+    // created, so they are added for the first start only.
+    std::vector<std::string> validator_args(bool with_genesis) const {
+        auto args = base_args();
+        if (with_genesis) {
+            auto g = genesis_args();
+            args.insert(args.end(), g.begin(), g.end());
+        }
+        return args;
     }
 
     static std::string shell_join(const std::vector<std::string>& args) {
@@ -591,8 +652,8 @@ struct SolanaTestValidatorBackend::Impl {
     }
 
     void wait_until_healthy(pid_t pid, const char* role) {
-        RpcClient probe(rpc_url(), 0, "", {});
-        auto timeout = std::chrono::milliseconds(cfg.startup_timeout_ms.value_or(120'000));
+        JsonRpc probe(rpc_url());
+        auto timeout = startup_timeout();
         auto deadline = std::chrono::steady_clock::now() + timeout;
         while (std::chrono::steady_clock::now() < deadline) {
             int status = 0;
@@ -600,24 +661,22 @@ struct SolanaTestValidatorBackend::Impl {
                 fail(cfg.origin, std::string("solana-test-validator (") + role + ") exited during startup; last log lines:\n" +
                                      tail_lines(log_file, 15));
             if (probe.healthy()) return;
-            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            std::this_thread::sleep_for(health_poll_interval);
         }
-        stop_process(pid, SIGTERM, std::chrono::seconds(10));
+        stop_process(pid, SIGTERM, abort_stop_timeout);
         fail(cfg.origin, std::string("solana-test-validator (") + role + ") did not become healthy within " +
                              std::to_string(timeout.count()) + "ms; see " + log_file.string());
     }
 
-    RpcClient& make_client() {
-        client = std::make_unique<RpcClient>(rpc_url(), cfg.confirm_timeout_ms.value_or(60'000), opts.solana_cli, keys_dir);
+    RpcRuntime& make_client() {
+        client = std::make_unique<RpcRuntime>(rpc_url(), cfg.confirm_timeout_ms.value_or(default_confirm_timeout_ms),
+                                             opts.solana_cli, keys_dir);
         return *client;
     }
 
     RuntimeClient& start_bootstrap() {
         write_genesis_files();
-        auto args = base_args();
-        auto g = genesis_args();
-        args.insert(args.end(), g.begin(), g.end());
-        bootstrap_pid = start_validator(args, "bootstrap");
+        bootstrap_pid = start_validator(validator_args(true), "bootstrap");
         ledger_initialized = true;
         return make_client();
     }
@@ -628,10 +687,10 @@ struct SolanaTestValidatorBackend::Impl {
             // ledger provably contains them.
             std::uint64_t target = client->slot();
             log << "    waiting for bootstrap state to finalize (slot " << target << ")\n";
-            wait_for_slot(*client, "finalized", target, std::chrono::seconds(90), "bootstrap state did not finalize");
+            wait_for_slot(client->rpc(), "finalized", target, finalize_timeout, "bootstrap state did not finalize");
             persisted_slot = target;
             log << "    stopping bootstrap instance\n";
-            stop_process(bootstrap_pid, SIGINT, std::chrono::seconds(30));
+            stop_process(bootstrap_pid, SIGINT, graceful_stop_timeout);
             bootstrap_pid = -1;
         } else {
             write_genesis_files();
@@ -639,17 +698,15 @@ struct SolanaTestValidatorBackend::Impl {
         Json manifest = {{"network", cfg.name},
                          {"rpc_url", rpc_url()},
                          {"ledger", ledger_dir.string()},
-                         {"accounts", gen.accounts_.size()},
-                         {"programs", gen.programs_.size()},
+                         {"accounts", gen.accounts().size()},
+                         {"programs", gen.program_count()},
                          {"bootstrapped", ledger_initialized}};
         Json accounts = Json::array();
-        for (const auto& [addr, e] : gen.accounts_)
+        for (const auto& [addr, e] : gen.accounts())
             accounts.push_back({{"address", addr.base58()}, {"owner", e.first.owner.base58()}, {"lamports", e.first.lamports}});
         manifest["genesis_accounts"] = accounts;
         if (opts.dry_run) {
-            auto args = base_args();
-            auto g = genesis_args();
-            args.insert(args.end(), g.begin(), g.end());
+            auto args = validator_args(true);
             manifest["command"] = args;
             log << "    state written to " << state_dir.string() << "\n    launch command: " << shell_join(args) << "\n";
         }
@@ -657,30 +714,25 @@ struct SolanaTestValidatorBackend::Impl {
     }
 
     RuntimeClient& launch() {
-        auto args = base_args();
-        if (!ledger_initialized) {
-            auto g = genesis_args();
-            args.insert(args.end(), g.begin(), g.end());
-        }
-        network_pid = start_validator(args, "network");
+        network_pid = start_validator(validator_args(!ledger_initialized), "network");
         write_file(state_dir / "validator.pid", std::to_string(network_pid));
-        RpcClient& c = make_client();
+        RpcRuntime& c = make_client();
         if (persisted_slot) {
             // A resumed validator answers health checks while still replaying.
-            wait_for_slot(c, "confirmed", *persisted_slot, std::chrono::milliseconds(cfg.startup_timeout_ms.value_or(120'000)),
+            wait_for_slot(c.rpc(), "confirmed", *persisted_slot, startup_timeout(),
                           "the relaunched validator did not replay the persisted ledger");
         }
         return c;
     }
 
-    void wait_for_slot(RpcClient& c, const char* commitment, std::uint64_t target, std::chrono::milliseconds timeout,
+    void wait_for_slot(JsonRpc& c, const char* commitment, std::uint64_t target, std::chrono::milliseconds timeout,
                        const char* what) {
         auto deadline = std::chrono::steady_clock::now() + timeout;
-        while (c.slot_at(commitment) < target) {
+        while (c.slot(commitment) < target) {
             if (std::chrono::steady_clock::now() > deadline)
                 fail(cfg.origin, std::string(what) + " within " + std::to_string(timeout.count()) + "ms (target slot " +
                                      std::to_string(target) + ")");
-            std::this_thread::sleep_for(std::chrono::milliseconds(400));
+            std::this_thread::sleep_for(slot_poll_interval);
         }
     }
 
@@ -691,10 +743,10 @@ struct SolanaTestValidatorBackend::Impl {
 
     void abort() noexcept {
         try {
-            if (bootstrap_pid > 0) stop_process(bootstrap_pid, SIGTERM, std::chrono::seconds(10));
+            if (bootstrap_pid > 0) stop_process(bootstrap_pid, SIGTERM, abort_stop_timeout);
             bootstrap_pid = -1;
             if (network_pid > 0 && !detached) {
-                stop_process(network_pid, SIGTERM, std::chrono::seconds(10));
+                stop_process(network_pid, SIGTERM, abort_stop_timeout);
                 std::error_code ec;
                 fs::remove(state_dir / "validator.pid", ec);
             }
@@ -732,7 +784,7 @@ bool stop_network(const fs::path& state_dir, std::ostream& log, std::string& err
     }
     if (process_alive(pid)) {
         log << "stopping validator (pid " << pid << ")\n";
-        stop_process(pid, SIGINT, std::chrono::seconds(20));
+        stop_process(pid, SIGINT, down_stop_timeout);
     } else {
         log << "validator (pid " << pid << ") was not running\n";
     }

@@ -11,11 +11,6 @@ namespace tide::sema {
 
 using namespace ast;
 
-template <class... Ts>
-struct overloaded : Ts... {
-    using Ts::operator()...;
-};
-
 // ============================================================ TypeContext ==
 
 TypeContext::TypeContext() {
@@ -28,7 +23,7 @@ TypeContext::TypeContext() {
     float_t_ = prim(TypeKind::float_);
     {
         Type f{TypeKind::float_};
-        f.width = IntWidth::u32;
+        f.is_f32 = true;
         float32_ = make(std::move(f));
     }
     string_ = prim(TypeKind::string);
@@ -39,10 +34,10 @@ TypeContext::TypeContext() {
     source_ = prim(TypeKind::source);
     range_ = prim(TypeKind::range);
     meta_ = prim(TypeKind::account_meta);
-    for (int i = 0; i < 11; ++i) {
+    for (IntWidth w : all_int_widths) {
         Type t{TypeKind::int_};
-        t.width = static_cast<IntWidth>(i);
-        ints_[i] = make(std::move(t));
+        t.width = w;
+        ints_[static_cast<std::size_t>(w)] = make(std::move(t));
     }
     account_info_ = record({{"address", pubkey_}, {"lamports", int_(IntWidth::u64)}, {"owner", pubkey_},
                             {"data", bytes_}, {"executable", bool_t_}, {"rent_epoch", int_(IntWidth::u64)}});
@@ -89,8 +84,20 @@ const Type* TypeContext::module(const Module* m) {
 }
 
 std::string to_string(IntWidth w) {
-    static const char* names[] = {"int", "u8", "u16", "u32", "u64", "u128", "i8", "i16", "i32", "i64", "i128"};
-    return names[static_cast<int>(w)];
+    switch (w) {
+        case IntWidth::any: return "int";
+        case IntWidth::u8: return "u8";
+        case IntWidth::u16: return "u16";
+        case IntWidth::u32: return "u32";
+        case IntWidth::u64: return "u64";
+        case IntWidth::u128: return "u128";
+        case IntWidth::i8: return "i8";
+        case IntWidth::i16: return "i16";
+        case IntWidth::i32: return "i32";
+        case IntWidth::i64: return "i64";
+        case IntWidth::i128: return "i128";
+    }
+    return "int";
 }
 
 std::pair<__int128, __int128> int_bounds(IntWidth w) {
@@ -121,7 +128,7 @@ std::string to_string(const Type* t) {
         case TypeKind::null: return "null";
         case TypeKind::bool_: return "bool";
         case TypeKind::int_: return to_string(t->width);
-        case TypeKind::float_: return t->width == IntWidth::u32 ? "f32" : "float";
+        case TypeKind::float_: return t->is_f32 ? "f32" : "float";
         case TypeKind::string: return "string";
         case TypeKind::bytes: return "bytes";
         case TypeKind::duration: return "duration";
@@ -417,6 +424,15 @@ private:
         return s;
     }
 
+    // Records `key` at `loc`. A repeat reports `msg` with a note at the first
+    // occurrence. Returns whether `key` was new.
+    bool check_unique(std::map<std::string, Loc>& seen, const std::string& key, Loc loc, const std::string& msg,
+                      const char* note = "previous definition is here") {
+        auto [it, inserted] = seen.try_emplace(key, loc);
+        if (!inserted) diags_.error(loc, msg).notes.push_back({it->second, note});
+        return inserted;
+    }
+
     Symbol* lookup(std::string_view name) const {
         for (Scope* s = scope_; s; s = s->parent)
             if (auto it = s->names.find(name); it != s->names.end()) return it->second;
@@ -433,13 +449,10 @@ private:
     // ----------------------------------------------------------- modules --
 
     void check_module(Module& m) {
-        Module* saved_module = module_;
-        Scope* saved_scope = scope_;
-        Ctx saved_ctx = ctx_;
-        module_ = &m;
         Scope global;
-        scope_ = &global;
-        ctx_ = Ctx::top_level;
+        Restore in_module(module_, &m);
+        Restore in_global(scope_, &global);
+        Restore at_top(ctx_, Ctx::top_level);
 
         std::map<std::string, Loc> networks;
         for (auto& d : m.doc->decls) {
@@ -451,10 +464,7 @@ private:
                            [&](SchemaDecl& s) { check_schema(s); },
                            [&](FunctionDecl& f) { check_function(f); },
                            [&](NetworkDecl& n) {
-                               auto [it, ok] = networks.try_emplace(n.name.name, n.name.loc);
-                               if (!ok)
-                                   diags_.error(n.name.loc, "duplicate network '" + n.name.name + "'")
-                                       .notes.push_back({it->second, "previous definition is here"});
+                               check_unique(networks, n.name.name, n.name.loc, "duplicate network '" + n.name.name + "'");
                                check_network(n);
                            },
                        },
@@ -462,10 +472,6 @@ private:
         }
         for (const auto& [name, sym] : global.names) m.exports[name] = sym;
         prog_.init_order.push_back(&m);
-
-        module_ = saved_module;
-        scope_ = saved_scope;
-        ctx_ = saved_ctx;
     }
 
     void check_import(ImportDecl& imp) {
@@ -547,19 +553,18 @@ private:
         sym->is_global = true;
         s.sym = sym;
         sym->type = T.schema(sym);
-        if (s.format.name != "borsh" && s.format.name != "anchor") {
+        if (s.format.name == "anchor") {
+            sym->schema_format = SchemaFormat::anchor;
+        } else if (s.format.name != "borsh") {
             std::string_view formats[] = {"borsh", "anchor"};
             diags_.error(s.format.loc, "unknown schema format '" + s.format.name + "'; expected 'borsh' or 'anchor'" +
                                            suggest(s.format.name, formats));
         }
-        sym->schema_format = s.format.name;
         std::vector<std::pair<std::string, const Type*>> fields;
         std::map<std::string, Loc> seen;
         for (auto& f : s.fields) {
-            auto [it, ok] = seen.try_emplace(f.name.name, f.name.loc);
-            if (!ok)
-                diags_.error(f.name.loc, "duplicate field '" + f.name.name + "' in schema '" + s.name.name + "'")
-                    .notes.push_back({it->second, "previous field is here"});
+            check_unique(seen, f.name.name, f.name.loc,
+                         "duplicate field '" + f.name.name + "' in schema '" + s.name.name + "'", "previous field is here");
             fields.emplace_back(f.name.name, resolve_type(f.type, true));
         }
         sym->schema_record = T.record(std::move(fields), sym);
@@ -575,13 +580,10 @@ private:
         for (auto& p : f.params) sym->param_types.push_back(resolve_type(p.type, false));
         sym->return_type = f.ret ? resolve_type(*f.ret, false) : T.void_();
 
-        Ctx saved_ctx = ctx_;
-        const Symbol* saved_fn = function_;
-        int saved_loops = loop_depth_;
-        ctx_ = Ctx::function;
-        function_ = sym;
-        loop_depth_ = 0;
         {
+            Restore in_function(ctx_, Ctx::function);
+            Restore current(function_, static_cast<const Symbol*>(sym));
+            Restore no_loops(loop_depth_, 0);
             ScopeGuard g(*this);
             for (std::size_t i = 0; i < f.params.size(); ++i) {
                 f.params[i].sym = declare(SymbolKind::parameter, f.params[i].name, sym->param_types[i]);
@@ -592,9 +594,6 @@ private:
             !block_terminates(f.body))
             diags_.error(f.name.loc, "function '" + f.name.name + "' may reach the end of its body without returning a " +
                                          to_string(sym->return_type));
-        ctx_ = saved_ctx;
-        function_ = saved_fn;
-        loop_depth_ = saved_loops;
     }
 
     static bool block_terminates(const Block& b) {
@@ -626,10 +625,7 @@ private:
                                with_ctx(Ctx::config, [&] { check_block(o.body, {"options", option_fields}); });
                            },
                            [&](ValidatorEntry& v) {
-                               auto [it, ok] = validators.try_emplace(v.name.name, v.name.loc);
-                               if (!ok)
-                                   diags_.error(v.name.loc, "duplicate validator '" + v.name.name + "'")
-                                       .notes.push_back({it->second, "previous definition is here"});
+                               check_unique(validators, v.name.name, v.name.loc, "duplicate validator '" + v.name.name + "'");
                                with_ctx(Ctx::config, [&] { check_block(v.body, {"validator", validator_fields}); });
                            },
                            [&](LetStmt& l) { check_binding(l, false); },
@@ -643,10 +639,7 @@ private:
                                with_ctx(Ctx::runtime, [&] { block(b.body); });
                            },
                            [&](ScenarioEntry& s) {
-                               auto [it, ok] = scenarios.try_emplace(s.name.name, s.name.loc);
-                               if (!ok)
-                                   diags_.error(s.name.loc, "duplicate scenario '" + s.name.name + "'")
-                                       .notes.push_back({it->second, "previous definition is here"});
+                               check_unique(scenarios, s.name.name, s.name.loc, "duplicate scenario '" + s.name.name + "'");
                                with_ctx(Ctx::runtime, [&] { block(s.body); });
                            },
                        },
@@ -656,13 +649,9 @@ private:
 
     template <typename F>
     void with_ctx(Ctx c, F&& f) {
-        Ctx saved = ctx_;
-        int saved_loops = loop_depth_;
-        ctx_ = c;
-        loop_depth_ = 0;
+        Restore in_ctx(ctx_, c);
+        Restore no_loops(loop_depth_, 0);
         f();
-        ctx_ = saved;
-        loop_depth_ = saved_loops;
     }
 
     // ------------------------------------------------------------- types --
@@ -989,10 +978,7 @@ private:
         if (expected && expected->kind == TypeKind::option) expected = expected->elem;
         std::map<std::string, Loc> seen;
         for (auto& f : o.fields) {
-            auto [it, ok] = seen.try_emplace(f.key, f.loc);
-            if (!ok)
-                diags_.error(f.loc, "duplicate key '" + f.key + "' in object literal")
-                    .notes.push_back({it->second, "previous key is here"});
+            check_unique(seen, f.key, f.loc, "duplicate key '" + f.key + "' in object literal", "previous key is here");
         }
         if (expected && expected->kind == TypeKind::record && !expected->fields.empty()) {
             std::string what = expected->schema ? "schema '" + expected->schema->name + "'" : to_string(expected);
@@ -1174,7 +1160,7 @@ private:
         return T.error();
     }
 
-    const Type* check(Expr& e, CallExpr& c, const Type* expected) {
+    const Type* check(Expr& e, CallExpr& c, const Type* /*expected*/) {
         // User function, possibly through a module.
         const Symbol* fn = nullptr;
         std::string fn_name;
@@ -1184,7 +1170,7 @@ private:
             if (!s) {
                 if (const BuiltinDef* b = find_builtin(id->name)) {
                     c.builtin = b->id;
-                    return check_builtin(e, c, *b, expected);
+                    return check_builtin(e, c, *b);
                 }
                 std::vector<std::string> names;
                 for (const auto& b : builtin_table) names.emplace_back(b.name);
@@ -1305,7 +1291,7 @@ private:
         return nullptr;
     }
 
-    const Type* check_builtin(Expr& e, CallExpr& c, const BuiltinDef& b, const Type* expected) {
+    const Type* check_builtin(Expr& e, CallExpr& c, const BuiltinDef& b) {
         // Effects first: some builtins need network state.
         if (b.effect == Effect::state && ctx_ != Ctx::genesis && ctx_ != Ctx::runtime)
             diags_.error(e.loc, "'" + std::string(b.name) +
@@ -1456,7 +1442,6 @@ private:
             case BuiltinId::epoch: return nullary(T.int_());
             case BuiltinId::none: break;
         }
-        (void)expected;
         return T.error();
     }
 
@@ -1470,9 +1455,8 @@ private:
     void loop_body(Block& b, ForStmt* f, const Type* var_type) {
         ScopeGuard g(*this);
         if (f) f->sym = declare(SymbolKind::loop_var, f->var, var_type);
-        ++loop_depth_;
+        Restore in_loop(loop_depth_, loop_depth_ + 1);
         for (auto& s : b) stmt(*s);
-        --loop_depth_;
     }
 
     static const char* ctx_name(Ctx c) {
@@ -1602,8 +1586,7 @@ private:
                        [&](WarpStmt& w) {
                            if (!require_runtime(s, "warp")) return;
                            if (w.kind == WarpKind::to_time) {
-                               const Type* t = value_type(*w.value, "warp time");
-                               (void)t;
+                               value_type(*w.value, "warp time");
                            } else {
                                expect(*w.value, T.int_(IntWidth::u64), "warp target");
                            }
@@ -1638,9 +1621,7 @@ private:
             id->sym = s;
             e.type = s->type;
             if (!s->is_mutable) {
-                static const char* kinds[] = {"variable", "keypair", "source", "function", "schema", "module",
-                                              "parameter", "loop variable", "transaction result"};
-                diags_.error(e.loc, std::string("cannot assign to ") + kinds[static_cast<int>(s->kind)] + " '" + id->name +
+                diags_.error(e.loc, std::string("cannot assign to ") + symbol_kind_name(s->kind) + " '" + id->name +
                                         "'; only 'let' variables are mutable")
                     .notes.push_back({s->loc, "declared here"});
                 return nullptr;
@@ -1697,8 +1678,7 @@ private:
         }
         const Type* v = value_type(*a.value, "assigned value");
         if (is_err(v) || is_err(target)) return;
-        static const BinaryOp ops[] = {BinaryOp::add, BinaryOp::add, BinaryOp::sub, BinaryOp::mul, BinaryOp::div, BinaryOp::mod};
-        const Type* r = arith(ops[static_cast<int>(a.op)], target, v);
+        const Type* r = arith(compound_op(a.op), target, v);
         if (!r || !assignable(r, target))
             diags_.error(a.value->loc, "compound assignment cannot combine " + to_string(target) + " with " + to_string(v));
     }
@@ -1724,9 +1704,35 @@ private:
         expect(*r.value, want, "return value of '" + function_->name + "'");
     }
 
+    static const char* symbol_kind_name(SymbolKind k) {
+        switch (k) {
+            case SymbolKind::variable: return "variable";
+            case SymbolKind::keypair: return "keypair";
+            case SymbolKind::source: return "source";
+            case SymbolKind::function: return "function";
+            case SymbolKind::schema: return "schema";
+            case SymbolKind::module: return "module";
+            case SymbolKind::parameter: return "parameter";
+            case SymbolKind::loop_var: return "loop variable";
+            case SymbolKind::tx_binding: return "transaction result";
+        }
+        return "symbol";
+    }
+
+    static const char* entity_keyword(EntityKind k) {
+        switch (k) {
+            case EntityKind::account: return "account";
+            case EntityKind::program: return "program";
+            case EntityKind::mint: return "mint";
+            case EntityKind::token_account: return "token_account";
+            case EntityKind::associated_token_account: return "associated_token_account";
+            case EntityKind::lookup_table: return "lookup_table";
+        }
+        return "entity";
+    }
+
     void check_entity(Stmt& s, EntityDecl& d) {
-        static const char* names[] = {"account", "program", "mint", "token_account", "associated_token_account", "lookup_table"};
-        const char* what = names[static_cast<int>(d.kind)];
+        const char* what = entity_keyword(d.kind);
         require_genesis(s, what);
         if (d.target) expect(*d.target, T.pubkey(), std::string(what) + " address");
         BlockSpec spec{what, {}};
@@ -1734,9 +1740,7 @@ private:
             case EntityKind::account: spec.fields = account_fields; break;
             case EntityKind::program:
                 spec.fields = program_fields;
-                if (auto [it, ok] = program_labels_.try_emplace(d.label.name, d.label.loc); !ok)
-                    diags_.error(d.label.loc, "duplicate program '" + d.label.name + "' in genesis")
-                        .notes.push_back({it->second, "previous definition is here"});
+                check_unique(program_labels_, d.label.name, d.label.loc, "duplicate program '" + d.label.name + "' in genesis");
                 break;
             case EntityKind::mint:
                 spec.fields = mint_fields;
@@ -1790,9 +1794,7 @@ private:
                 check_block(e.body, {"instruction", instruction_fields});
                 continue;
             }
-            auto [it, ok] = seen.try_emplace(e.key, e.loc);
-            if (!ok)
-                diags_.error(e.loc, "duplicate transaction field '" + e.key + "'").notes.push_back({it->second, "previous value is here"});
+            check_unique(seen, e.key, e.loc, "duplicate transaction field '" + e.key + "'", "previous value is here");
             const FieldSpec* spec = nullptr;
             for (const auto& f : tx_fields)
                 if (f.name == e.key) spec = &f;
@@ -1859,15 +1861,12 @@ private:
                     diags_.error(e.loc, "unknown " + std::string(spec.what) + " extension '" + e.key + "'" + suggest(e.key, ext_names));
                     continue;
                 }
-                auto [it, ok] = seen.try_emplace("extension " + e.key, e.loc);
-                if (!ok) diags_.error(e.loc, "duplicate extension '" + e.key + "'").notes.push_back({it->second, "previous definition is here"});
+                check_unique(seen, "extension " + e.key, e.loc, "duplicate extension '" + e.key + "'");
                 check_entries(e.block->entries, {ext->name, ext->fields}, e.block->loc);
                 continue;
             }
-            auto [it, ok] = seen.try_emplace(e.key, e.loc);
-            if (!ok)
-                diags_.error(e.loc, "duplicate field '" + e.key + "' in " + std::string(spec.what))
-                    .notes.push_back({it->second, "previous value is here"});
+            check_unique(seen, e.key, e.loc, "duplicate field '" + e.key + "' in " + std::string(spec.what),
+                         "previous value is here");
             const FieldSpec* fs = nullptr;
             for (const auto& f : spec.fields)
                 if (f.name == e.key) fs = &f;

@@ -84,16 +84,22 @@ extern const Pubkey system_program, token_program, token_2022_program, associate
 // Rent: (data_len + 128) * 3480 lamports/byte-year * 2 years.
 std::uint64_t rent_exempt_minimum(std::size_t data_len);
 constexpr std::uint64_t lamports_per_sol = 1'000'000'000;
+// Largest serialized transaction a cluster accepts (IPv6 MTU minus headers).
+constexpr std::size_t max_transaction_size = 1232;
 
 // ------------------------------------------------------------------ borsh --
 
 class BorshWriter {
 public:
     void u8(std::uint8_t v) { out_.push_back(v); }
-    void u16(std::uint16_t v) { le(v, 2); }
-    void u32(std::uint32_t v) { le(v, 4); }
-    void u64(std::uint64_t v) { le(v, 8); }
-    void u128(unsigned __int128 v) { le(v, 16); }
+    void u16(std::uint16_t v) { uint_le(v, 2); }
+    void u32(std::uint32_t v) { uint_le(v, 4); }
+    void u64(std::uint64_t v) { uint_le(v, 8); }
+    void u128(unsigned __int128 v) { uint_le(v, 16); }
+    // The low `n` bytes of `v`, little-endian (any integer width up to 16 bytes).
+    void uint_le(unsigned __int128 v, int n) {
+        for (int i = 0; i < n; ++i) out_.push_back(static_cast<std::uint8_t>(v >> (8 * i)));
+    }
     void boolean(bool v) { u8(v ? 1 : 0); }
     void f32(float v);
     void f64(double v);
@@ -105,10 +111,6 @@ public:
     Bytes take() { return std::move(out_); }
 
 private:
-    template <typename T>
-    void le(T v, int n) {
-        for (int i = 0; i < n; ++i) out_.push_back(static_cast<std::uint8_t>(v >> (8 * i)));
-    }
     Bytes out_;
 };
 
@@ -119,11 +121,13 @@ struct DecodeError : std::runtime_error {
 class BorshReader {
 public:
     explicit BorshReader(ByteView data) : data_(data) {}
-    std::uint8_t u8() { return static_cast<std::uint8_t>(le(1)); }
-    std::uint16_t u16() { return static_cast<std::uint16_t>(le(2)); }
-    std::uint32_t u32() { return static_cast<std::uint32_t>(le(4)); }
-    std::uint64_t u64() { return static_cast<std::uint64_t>(le(8)); }
-    unsigned __int128 u128() { return le(16); }
+    std::uint8_t u8() { return static_cast<std::uint8_t>(uint_le(1)); }
+    std::uint16_t u16() { return static_cast<std::uint16_t>(uint_le(2)); }
+    std::uint32_t u32() { return static_cast<std::uint32_t>(uint_le(4)); }
+    std::uint64_t u64() { return static_cast<std::uint64_t>(uint_le(8)); }
+    unsigned __int128 u128() { return uint_le(16); }
+    // `n` little-endian bytes as an unsigned integer (n <= 16).
+    unsigned __int128 uint_le(int n);
     bool boolean();
     float f32();
     double f64();
@@ -135,7 +139,6 @@ public:
     std::size_t position() const { return pos_; }
 
 private:
-    unsigned __int128 le(int n);
     ByteView data_;
     std::size_t pos_ = 0;
 };

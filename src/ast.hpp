@@ -7,6 +7,7 @@
 
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <variant>
 #include <vector>
@@ -165,6 +166,21 @@ struct LetStmt {
 };
 
 enum class AssignOp { set, add, sub, mul, div, mod };
+
+// Arithmetic operator behind a compound assignment (`+=` is add). Plain `=`
+// has none.
+constexpr BinaryOp compound_op(AssignOp op) {
+    switch (op) {
+        case AssignOp::add: return BinaryOp::add;
+        case AssignOp::sub: return BinaryOp::sub;
+        case AssignOp::mul: return BinaryOp::mul;
+        case AssignOp::div: return BinaryOp::div;
+        case AssignOp::mod: return BinaryOp::mod;
+        case AssignOp::set: break;
+    }
+    throw std::logic_error("plain assignment has no arithmetic operator");
+}
+
 struct AssignStmt {
     ExprPtr target;
     AssignOp op = AssignOp::set;

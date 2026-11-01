@@ -327,7 +327,7 @@ void BorshWriter::f64(double v) {
     u64(bits);
 }
 
-unsigned __int128 BorshReader::le(int n) {
+unsigned __int128 BorshReader::uint_le(int n) {
     if (remaining() < static_cast<std::size_t>(n)) throw DecodeError("unexpected end of data");
     unsigned __int128 v = 0;
     for (int i = 0; i < n; ++i) v |= static_cast<unsigned __int128>(data_[pos_ + i]) << (8 * i);

@@ -27,7 +27,7 @@ struct FakeBackend final : NetworkBackend, GenesisBuilder, RuntimeClient {
     std::vector<TransactionRequest> txs;
     std::vector<std::string> events;
     std::function<TxResult(const TransactionRequest&)> on_tx = [](const TransactionRequest&) {
-        return TxResult{true, "sig", "", {"Program log: ok"}, 7};
+        return TxResult{.success = true, .signature = "sig", .logs = {"Program log: ok"}, .slot = 7};
     };
     std::uint64_t current_slot = 0;
 
@@ -79,9 +79,9 @@ struct FakeBackend final : NetworkBackend, GenesisBuilder, RuntimeClient {
         auto& a = accounts[to];
         a.address = to;
         a.lamports += lamports;
-        return {true, "airdrop-sig", "", {}, 1};
+        return TxResult{.success = true, .signature = "airdrop-sig", .slot = 1};
     }
-    TxResult deploy(const DeployRequest&) override { return {true, "", "", {}, 0}; }
+    TxResult deploy(const DeployRequest&) override { return TxResult{.success = true}; }
     std::optional<AccountView> account(const Pubkey& a) override { return std::as_const(*this).account(a); }
     std::uint64_t slot() override { return current_slot++; }
     std::uint64_t epoch() override { return 0; }
@@ -205,7 +205,7 @@ TEST_CASE("bootstrap failures abort the lifecycle", "[interp]") {
           }
         }
     )", {}, "test.tid", [](FakeBackend& b) {
-        b.on_tx = [](const TransactionRequest&) { return TxResult{false, "s", "InstructionError", {"Program log: boom"}, 0}; };
+        b.on_tx = [](const TransactionRequest&) { return TxResult{.signature = "s", .error = "InstructionError", .logs = {"Program log: boom"}}; };
     });
     CHECK_FALSE(r->result.ok);
     CHECK(r->has("transaction failed: InstructionError"));
@@ -319,6 +319,65 @@ TEST_CASE("lookup tables, sysvars, features and clones reach the backend", "[int
     CHECK(r->backend.clones[0].url == "devnet");
     CHECK(r->backend.clones[0].slot == 5u);
     CHECK(r->backend.clones[0].overrides.lamports == 9u);
+}
+
+// Uses every key the checker accepts in every record-like block. Any key that
+// passes sema without an interpreter handler fails here as an internal error
+// instead of being silently dropped.
+TEST_CASE("every checker-accepted field has an interpreter handler", "[interp]") {
+    fs::path dir = temp_dir("tide_all_fields_test");
+    std::ofstream(dir / "p.so") << "elf";
+    std::ofstream(dir / "p.json") << R"({"instructions": [{"name": "go", "accounts": [], "args": []}]})";
+    std::string src = R"(
+        keypair a = seed("a");
+        keypair p = seed("p");
+        let m = seed("mint").pubkey;
+        network n {
+          options {
+            slots_per_epoch = 64; ticks_per_slot = 8; ledger = "led"; faucet_sol = 1.5; compute_unit_limit = 1000;
+            limit_ledger_size = 10000; warp_slot = 3; bind_address = "127.0.0.1"; startup_timeout = 5s; confirm_timeout = 2s;
+          }
+          validator v {
+            rpc_port = 1111; gossip_port = 2222; faucet_port = 3333; dynamic_port_range = "4000-4100";
+            identity = a; bind_address = "127.0.0.1";
+          }
+          genesis {
+            account seed("acc").pubkey { lamports = 1 SOL; owner = system_program(); data = [1, 2]; executable = false; rent_epoch = 0; }
+            program p { id = p.pubkey; binary = "p.so"; loader = bpf_upgradeable_loader(); upgrade_authority = a.pubkey; idl = "p.json"; }
+            mint m { token_program = token_program(); decimals = 6; mint_authority = a.pubkey; freeze_authority = null;
+                     supply = 10; lamports = 1 SOL; }
+            token_account seed("ta").pubkey { token_program = token_program(); mint = m; owner = a.pubkey; amount = 4;
+                     delegate = a.pubkey; delegated_amount = 1; state = "initialized"; close_authority = null; lamports = 1 SOL; }
+            associated_token_account ata(a.pubkey, m) { token_program = token_program(); mint = m; owner = a.pubkey;
+                     amount = 6; lamports = 1 SOL; }
+            lookup_table seed("lut").pubkey { authority = a.pubkey; addresses = [m]; deactivation_slot = 9; last_extended_slot = 1;
+                     lamports = 1 SOL; }
+            clone account seed("c").pubkey from rpc("devnet") { lamports = 1; owner = system_program(); data = [0];
+                     executable = false; rent_epoch = 0; };
+          }
+          bootstrap {
+            transaction { fee_payer = a.pubkey; signers = [a]; compute_unit_limit = 5000; compute_unit_price = 1;
+              instruction memo_program() { accounts = [a.pubkey]; data = memo("hi"); } }
+            invoke p.pubkey with { method = "go"; accounts = {}; args = {}; signers = [a]; fee_payer = a.pubkey;
+              idl = "p.json"; compute_unit_limit = 5000; remaining_accounts = [readonly(m)]; };
+          }
+        }
+    )";
+    auto r = run(src, {}, dir / "main.tid");
+    INFO(r->dump());
+    REQUIRE(r->result.ok);
+    const NetworkConfig& c = r->backend.config;
+    CHECK(c.slots_per_epoch == 64u);
+    CHECK(c.confirm_timeout_ms == 2000);
+    CHECK(c.faucet_sol == 1.5);
+    REQUIRE(c.validators.size() == 1);
+    CHECK(c.validators[0].dynamic_port_range == "4000-4100");
+    CHECK(c.validators[0].identity.has_value());
+    REQUIRE(r->backend.txs.size() == 2);
+    CHECK(r->backend.txs[0].compute_unit_price == 1u);
+    CHECK(r->backend.txs[1].instructions[0].accounts.size() == 1);  // remaining_accounts
+    CHECK(r->backend.clones.at(0).overrides.executable == false);
+    fs::remove_all(dir);
 }
 
 // --------------------------------------------------------------- runtime --
@@ -480,7 +539,10 @@ TEST_CASE("runtime errors are positioned", "[interp]") {
     CHECK(div->has("division by zero"));
     CHECK(div->sm.locate(div->diags.all().front().loc.ptr).line == 3);
     CHECK(run(net("let big = 170141183460469231731687303715884105727;\nlet x = big + 1;"))->has("integer overflow"));
-    CHECK(run(net("let xs = [1];\nlet y = xs[3];"))->has("out of bounds"));
+    CHECK(run(net("let xs = [1];\nlet y = xs[3];"))->has("index 3 is out of bounds for a list of length 1"));
+    CHECK(run(net("let xs = [1];\nxs[-1] = 2;"))->has("index -1 is out of bounds for a list of length 1"));
+    CHECK(run(net("let b = hex(\"0102\");\nlet y = b[2];"))->has("index 2 is out of bounds for bytes of length 2"));
+    CHECK(run(net("let b = hex(\"0102\");\nb[5] += 1;"))->has("index 5 is out of bounds for bytes of length 2"));
     CHECK(run(net("let a = 200;\nlet b: u8 = a + 100;"))->has("300 is out of range for u8"));
     CHECK(run(net("assert 1 == 2, \"math\";"))->has("assertion failed: math"));
     CHECK(run("fn loop_forever(n: int) -> int { return loop_forever(n + 1); }\nnetwork n { genesis { let x = loop_forever(0); } }")

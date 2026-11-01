@@ -15,8 +15,11 @@
 
 namespace tide::backend {
 
+// Where network state lives when no state root is given: `<script dir>/.tide`.
+std::filesystem::path default_state_root(const std::filesystem::path& script_dir);
+
 struct SolanaBackendOptions {
-    std::filesystem::path state_root;  // default: <script dir>/.tide
+    std::filesystem::path state_root;  // empty: default_state_root(<script dir>)
     std::string validator_binary = "solana-test-validator";
     std::string solana_cli = "solana";
     bool dry_run = false;  // write state and print the command, never start processes

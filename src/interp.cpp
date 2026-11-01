@@ -9,6 +9,7 @@
 #include <ostream>
 #include <sstream>
 #include <thread>
+#include <set>
 #include <unordered_map>
 
 namespace tide {
@@ -23,11 +24,6 @@ using sol::Pubkey;
 using Json = nlohmann::json;
 
 namespace {
-
-template <class... Ts>
-struct overloaded : Ts... {
-    using Ts::operator()...;
-};
 
 // ================================================================= values ==
 
@@ -99,6 +95,13 @@ Value make_record(std::vector<std::pair<std::string, Value>> fields) {
 }
 
 [[noreturn]] void fail(Loc loc, const std::string& msg) { throw TideError(loc, msg); }
+
+// Ends a dispatch over block keys. Sema's field specs decide which keys exist;
+// reaching this means a key was added there without an interpreter handler.
+[[noreturn]] void unhandled_key(std::string_view block, const std::string& key) {
+    throw std::logic_error("internal error: " + std::string(block) + " key '" + key +
+                           "' passed the checker but has no interpreter handler");
+}
 
 std::string int_to_string(__int128 v) {
     if (v == 0) return "0";
@@ -224,21 +227,52 @@ struct Ser {
     std::string name;
 };
 
+// Integer layouts and their refinement width; nullopt for every other layout.
+std::optional<IntWidth> ser_width(Ser::K k) {
+    switch (k) {
+        case Ser::K::u8: return IntWidth::u8;
+        case Ser::K::u16: return IntWidth::u16;
+        case Ser::K::u32: return IntWidth::u32;
+        case Ser::K::u64: return IntWidth::u64;
+        case Ser::K::u128: return IntWidth::u128;
+        case Ser::K::i8: return IntWidth::i8;
+        case Ser::K::i16: return IntWidth::i16;
+        case Ser::K::i32: return IntWidth::i32;
+        case Ser::K::i64: return IntWidth::i64;
+        case Ser::K::i128: return IntWidth::i128;
+        case Ser::K::boolean: case Ser::K::f32: case Ser::K::f64: case Ser::K::string: case Ser::K::bytes:
+        case Ser::K::pubkey: case Ser::K::option: case Ser::K::vec: case Ser::K::array: case Ser::K::tuple:
+        case Ser::K::strct: case Ser::K::enm: break;
+    }
+    return std::nullopt;
+}
+bool is_int(Ser::K k) { return ser_width(k).has_value(); }
+bool is_signed(Ser::K k) { return k == Ser::K::i8 || k == Ser::K::i16 || k == Ser::K::i32 || k == Ser::K::i64 || k == Ser::K::i128; }
 int int_width_bytes(Ser::K k) {
     switch (k) {
         case Ser::K::u8: case Ser::K::i8: return 1;
         case Ser::K::u16: case Ser::K::i16: return 2;
         case Ser::K::u32: case Ser::K::i32: return 4;
         case Ser::K::u64: case Ser::K::i64: return 8;
-        default: return 16;
+        case Ser::K::u128: case Ser::K::i128: return 16;
+        default: throw std::logic_error("int_width_bytes: not an integer layout");
     }
 }
-bool is_signed(Ser::K k) { return k == Ser::K::i8 || k == Ser::K::i16 || k == Ser::K::i32 || k == Ser::K::i64 || k == Ser::K::i128; }
-bool is_int(Ser::K k) { return k <= Ser::K::i128; }
-IntWidth ser_width(Ser::K k) {
-    static const IntWidth w[] = {IntWidth::u8, IntWidth::u16, IntWidth::u32, IntWidth::u64, IntWidth::u128,
-                                 IntWidth::i8, IntWidth::i16, IntWidth::i32, IntWidth::i64, IntWidth::i128};
-    return w[static_cast<int>(k)];
+Ser::K ser_kind(IntWidth w) {
+    switch (w) {
+        case IntWidth::u8: return Ser::K::u8;
+        case IntWidth::u16: return Ser::K::u16;
+        case IntWidth::u32: return Ser::K::u32;
+        case IntWidth::u64: return Ser::K::u64;
+        case IntWidth::u128: return Ser::K::u128;
+        case IntWidth::i8: return Ser::K::i8;
+        case IntWidth::i16: return Ser::K::i16;
+        case IntWidth::i32: return Ser::K::i32;
+        case IntWidth::i64: return Ser::K::i64;
+        case IntWidth::any:  // unrefined ints are 128-bit at runtime
+        case IntWidth::i128: return Ser::K::i128;
+    }
+    return Ser::K::i128;
 }
 
 std::string snake_case(std::string_view s) {
@@ -253,6 +287,24 @@ std::string snake_case(std::string_view s) {
         }
     }
     return out;
+}
+
+// IDL names may be camelCase (pre-0.30 Anchor) while scripts use snake_case.
+bool same_name(std::string_view a, std::string_view b) { return a == b || snake_case(a) == snake_case(b); }
+
+// Field `name` of `r`: an exact match wins, otherwise the first same_name match.
+const Value* find_field(const RecordData& r, std::string_view name) {
+    if (const Value* v = r.find(name)) return v;
+    for (const auto& [n, v] : r.fields)
+        if (same_name(n, name)) return &v;
+    return nullptr;
+}
+
+// Name of the first field of `r` that matches none of `known`, if any.
+const std::string* first_unknown_field(const RecordData& r, const std::vector<std::string>& known) {
+    for (const auto& [n, _] : r.fields)
+        if (std::none_of(known.begin(), known.end(), [&](const std::string& k) { return same_name(k, n); })) return &n;
+    return nullptr;
 }
 
 // Checked access into untrusted JSON (IDL files): const operator[] on a
@@ -275,14 +327,9 @@ public:
     const Ser* from_type(const sema::Type* t) {
         Ser s;
         switch (t->kind) {
-            case TypeKind::int_: {
-                static const Ser::K ks[] = {Ser::K::i128, Ser::K::u8, Ser::K::u16, Ser::K::u32, Ser::K::u64, Ser::K::u128,
-                                            Ser::K::i8,   Ser::K::i16, Ser::K::i32, Ser::K::i64, Ser::K::i128};
-                s.k = ks[static_cast<int>(t->width)];
-                break;
-            }
+            case TypeKind::int_: s.k = ser_kind(t->width); break;
             case TypeKind::bool_: s.k = Ser::K::boolean; break;
-            case TypeKind::float_: s.k = t->width == IntWidth::u32 ? Ser::K::f32 : Ser::K::f64; break;
+            case TypeKind::float_: s.k = t->is_f32 ? Ser::K::f32 : Ser::K::f64; break;
             case TypeKind::string: s.k = Ser::K::string; break;
             case TypeKind::bytes: s.k = Ser::K::bytes; break;
             case TypeKind::pubkey: s.k = Ser::K::pubkey; break;
@@ -370,14 +417,13 @@ public:
         auto mismatch = [&](const char* expected) {
             fail(loc, "cannot encode " + path + ": expected " + expected + ", found " + format_value(v, true));
         };
-        if (is_int(s.k)) {
+        if (auto width = ser_width(s.k)) {
             if (!v.is<__int128>()) mismatch("an integer");
             __int128 x = v.as<__int128>();
-            auto [lo, hi] = sema::int_bounds(ser_width(s.k));
+            auto [lo, hi] = sema::int_bounds(*width);
             bool fits = s.k == Ser::K::u128 ? x >= 0 : (x >= lo && x <= hi);
-            if (!fits) fail(loc, "cannot encode " + path + ": " + int_to_string(x) + " is out of range for " + sema::to_string(ser_width(s.k)));
-            auto u = static_cast<unsigned __int128>(x);
-            for (int i = 0; i < int_width_bytes(s.k); ++i) w.u8(static_cast<std::uint8_t>(u >> (8 * i)));
+            if (!fits) fail(loc, "cannot encode " + path + ": " + int_to_string(x) + " is out of range for " + sema::to_string(*width));
+            w.uint_le(static_cast<unsigned __int128>(x), int_width_bytes(s.k));
             return;
         }
         switch (s.k) {
@@ -444,17 +490,12 @@ public:
             case Ser::K::strct: {
                 if (!v.is<RecordP>()) mismatch("an object");
                 const auto& r = *v.as<RecordP>();
-                for (const auto& [n, _] : r.fields) {
-                    bool known = false;
-                    for (const auto& [fn, __] : s.fields) known |= fn == n || snake_case(fn) == snake_case(n);
-                    if (!known) fail(loc, "cannot encode " + path + ": unknown field '" + n + "'" + (s.name.empty() ? "" : " for " + s.name));
-                }
+                std::vector<std::string> known;
+                for (const auto& [fn, _] : s.fields) known.push_back(fn);
+                if (const std::string* n = first_unknown_field(r, known))
+                    fail(loc, "cannot encode " + path + ": unknown field '" + *n + "'" + (s.name.empty() ? "" : " for " + s.name));
                 for (const auto& [fn, ft] : s.fields) {
-                    const Value* fv = r.find(fn);
-                    if (!fv) {
-                        for (const auto& [n, val] : r.fields)
-                            if (snake_case(n) == snake_case(fn)) fv = &val;
-                    }
+                    const Value* fv = find_field(r, fn);
                     if (!fv) {
                         if (ft->k == Ser::K::option) {
                             w.u8(0);
@@ -470,7 +511,7 @@ public:
                 if (!v.is<std::string>()) mismatch("an enum variant name (string)");
                 const auto& name = v.as<std::string>();
                 for (std::size_t i = 0; i < s.variants.size(); ++i)
-                    if (s.variants[i] == name || snake_case(s.variants[i]) == snake_case(name)) {
+                    if (same_name(s.variants[i], name)) {
                         w.u8(static_cast<std::uint8_t>(i));
                         return;
                     }
@@ -507,8 +548,7 @@ public:
     Value decode(sol::BorshReader& r, const Ser& s) const {
         if (is_int(s.k)) {
             int n = int_width_bytes(s.k);
-            unsigned __int128 u = 0;
-            for (int i = 0; i < n; ++i) u |= static_cast<unsigned __int128>(r.u8()) << (8 * i);
+            unsigned __int128 u = r.uint_le(n);
             if (is_signed(s.k) && n < 16 && (u >> (8 * n - 1)) & 1) u |= ~static_cast<unsigned __int128>(0) << (8 * n);
             return Value(static_cast<__int128>(u));
         }
@@ -610,6 +650,8 @@ struct Frame {
 
 constexpr std::uint64_t max_steps = 10'000'000;
 constexpr int max_call_depth = 256;
+constexpr auto await_poll_interval = std::chrono::milliseconds(400);
+constexpr std::size_t max_lookup_table_addresses = 256;
 
 }  // namespace
 
@@ -627,27 +669,30 @@ struct Interpreter::Impl {
 
     backend::GenesisBuilder* genesis = nullptr;
     backend::RuntimeClient* runtime = nullptr;
-    std::int64_t confirm_timeout_ms = 60'000;
+    std::int64_t confirm_timeout_ms = backend::default_confirm_timeout_ms;
 
-    // Genesis bookkeeping for cross-declaration validation.
-    struct Declared {
-        Loc loc;
-        std::string kind;
-    };
-    std::map<Pubkey, Declared> declared;
-    struct MintInfo {
-        Pubkey token_program;
-        std::uint64_t supply;
-        Loc loc;
-    };
-    std::map<Pubkey, MintInfo> mints;
-    struct TokenInfo {
-        Pubkey address, mint, token_program;
-        std::uint64_t amount;
-        Loc loc;
-    };
-    std::vector<TokenInfo> token_accounts;
-    std::map<Pubkey, std::filesystem::path> program_idls;
+    // What this run's genesis declared: drives cross-declaration validation
+    // and runtime IDL lookups. Reset as a whole at the start of every run.
+    struct GenesisLedger {
+        struct Declared {
+            Loc loc;
+            std::string kind;
+        };
+        struct MintInfo {
+            Pubkey token_program;
+            std::uint64_t supply;
+            Loc loc;
+        };
+        struct TokenInfo {
+            Pubkey address, mint, token_program;
+            std::uint64_t amount;
+            Loc loc;
+        };
+        std::map<Pubkey, Declared> declared;
+        std::map<Pubkey, MintInfo> mints;
+        std::vector<TokenInfo> token_accounts;
+        std::map<Pubkey, std::filesystem::path> program_idls;
+    } ledger;
     std::map<std::filesystem::path, Json> idl_cache;
 
     Impl(const sema::Program& p, Diagnostics& d, std::ostream& o) : prog(p), diags(d), out(o) {}
@@ -749,6 +794,11 @@ struct Interpreter::Impl {
         __int128 x = to_int(v, loc, what);
         if (x < 0 || x > static_cast<__int128>(UINT64_MAX)) fail(loc, what + ": " + int_to_string(x) + " is out of range for u64");
         return static_cast<std::uint64_t>(x);
+    }
+    std::uint32_t to_u32(const Value& v, Loc loc, const std::string& what) {
+        __int128 x = to_int(v, loc, what);
+        if (x < 0 || x > static_cast<__int128>(UINT32_MAX)) fail(loc, what + ": " + int_to_string(x) + " is out of range for u32");
+        return static_cast<std::uint32_t>(x);
     }
     std::uint8_t to_u8(const Value& v, Loc loc, const std::string& what) {
         __int128 x = to_int(v, loc, what);
@@ -938,20 +988,23 @@ struct Interpreter::Impl {
         return member_of(eval(*m.object), m.member.name, m.member.loc);
     }
 
+    // `i` as a position into a container of `size` elements, or a positioned error.
+    static std::size_t checked_index(__int128 i, std::size_t size, Loc loc, const char* container) {
+        if (i < 0 || i >= static_cast<__int128>(size))
+            fail(loc, "index " + int_to_string(i) + " is out of bounds for " + container + " of length " + std::to_string(size));
+        return static_cast<std::size_t>(i);
+    }
+
     Value eval_node(const Expr& e, const IndexExpr& ix) {
         Value obj = eval(*ix.object);
         __int128 i = to_int(eval(*ix.index), ix.index->loc, "index");
         if (obj.is<ListP>()) {
             const auto& l = *obj.as<ListP>();
-            if (i < 0 || i >= static_cast<__int128>(l.size()))
-                fail(e.loc, "index " + int_to_string(i) + " is out of bounds for a list of length " + std::to_string(l.size()));
-            return l[static_cast<std::size_t>(i)];
+            return l[checked_index(i, l.size(), e.loc, "a list")];
         }
         if (obj.is<Bytes>()) {
             const auto& b = obj.as<Bytes>();
-            if (i < 0 || i >= static_cast<__int128>(b.size()))
-                fail(e.loc, "index " + int_to_string(i) + " is out of bounds for bytes of length " + std::to_string(b.size()));
-            return Value(static_cast<__int128>(b[static_cast<std::size_t>(i)]));
+            return Value(static_cast<__int128>(b[checked_index(i, b.size(), e.loc, "bytes")]));
         }
         fail(e.loc, "value cannot be indexed");
     }
@@ -971,19 +1024,12 @@ struct Interpreter::Impl {
         for (std::size_t i = 0; i < args.size(); ++i)
             callee.vars[decl.params[i].sym] =
                 coerce(std::move(args[i]), fn->param_types[i], loc, "argument '" + decl.params[i].name.name + "'");
-        Frame* saved = frame;
-        frame = &callee;
-        ++depth;
         Flow f;
-        try {
+        {
+            Restore in_callee(frame, &callee);
+            Restore deeper(depth, depth + 1);
             f = exec_block(decl.body);
-        } catch (...) {
-            frame = saved;
-            --depth;
-            throw;
         }
-        frame = saved;
-        --depth;
         if (f == Flow::ret) {
             Value r = std::move(ret_value);
             ret_value = Value();
@@ -1022,11 +1068,10 @@ struct Interpreter::Impl {
         return ss.str();
     }
 
-    Bytes le_bytes(__int128 v, int n) {
-        Bytes out;
-        auto u = static_cast<unsigned __int128>(v);
-        for (int i = 0; i < n; ++i) out.push_back(static_cast<std::uint8_t>(u >> (8 * i)));
-        return out;
+    static Bytes le_bytes(__int128 v, int n) {
+        sol::BorshWriter w;
+        w.uint_le(static_cast<unsigned __int128>(v), n);
+        return w.take();
     }
 
     const Symbol* find_schema_named(const std::string& name) {
@@ -1056,7 +1101,7 @@ struct Interpreter::Impl {
         }
         const std::string& name = to_str(schema_or_name, loc, "anchor account type");
         if (const Symbol* s = find_schema_named(name)) return encode_anchor_account(Value(SchemaV{s}), data, loc);
-        for (const auto& [program, idl_path] : program_idls) {
+        for (const auto& [program, idl_path] : ledger.program_idls) {
             const Json& idl = load_idl(idl_path, loc);
             for (const auto& acc : idl.value("accounts", Json::array())) {
                 if (acc.value("name", "") != name) continue;
@@ -1075,36 +1120,62 @@ struct Interpreter::Impl {
                       " using anchor { ... }' or give the owning program an 'idl' in genesis");
     }
 
+    // Typed, positioned access to a builtin call's evaluated arguments. Errors
+    // point at the offending argument and name it ("argument 2 of 'ata'").
+    struct BuiltinArgs {
+        Impl& in;
+        const CallExpr& call;
+        const std::vector<Value>& values;
+        Loc call_loc;
+        std::string name;
+
+        std::size_t size() const { return values.size(); }
+        const Value& operator[](std::size_t i) const { return values[i]; }
+        Loc loc(std::size_t i) const { return i < call.args.size() ? call.args[i]->loc : call_loc; }
+        std::string what(std::size_t i) const { return "argument " + std::to_string(i + 1) + " of '" + name + "'"; }
+
+        std::string str(std::size_t i) const { return in.to_str(values[i], loc(i), what(i)); }
+        Pubkey pubkey(std::size_t i) const { return in.to_pubkey(values[i], loc(i), what(i)); }
+        std::uint64_t u64(std::size_t i) const { return in.to_u64(values[i], loc(i), what(i)); }
+        std::uint8_t u8(std::size_t i) const { return in.to_u8(values[i], loc(i), what(i)); }
+        double number(std::size_t i) const { return in.to_double(values[i], loc(i), what(i)); }
+        bool boolean(std::size_t i) const { return in.want<bool>(values[i], loc(i), "a bool", what(i)); }
+        Bytes bytes(std::size_t i) const { return Codec::to_bytes(values[i], loc(i), what(i)); }
+        const Symbol* schema(std::size_t i) const { return in.want<SchemaV>(values[i], loc(i), "a schema", what(i)).sym; }
+        // An integer range-checked against `w`.
+        __int128 int_as(std::size_t i, IntWidth w) const {
+            return in.to_int(in.coerce(values[i], in.prog.types.int_(w), loc(i), what(i)), loc(i), what(i));
+        }
+    };
+
     Value call_builtin(const Expr& e, const CallExpr& c, std::vector<Value> args) {
-        Loc loc = e.loc;
-        auto arg_loc = [&](std::size_t i) { return i < c.args.size() ? c.args[i]->loc : loc; };
-        const std::string name = sema::builtin_name(c.builtin);
-        auto what = [&](std::size_t i) { return "argument " + std::to_string(i + 1) + " of '" + name + "'"; };
+        const Loc loc = e.loc;
+        const BuiltinArgs a{*this, c, args, loc, sema::builtin_name(c.builtin)};
         switch (c.builtin) {
-            case BuiltinId::seed: return Value(sol::Keypair::from_name(to_str(args[0], arg_loc(0), what(0))));
+            case BuiltinId::seed: return Value(sol::Keypair::from_name(a.str(0)));
             case BuiltinId::keypair_file: {
-                auto path = resolve_path(to_str(args[0], arg_loc(0), what(0)));
+                auto path = resolve_path(a.str(0));
                 try {
-                    return Value(sol::Keypair::from_json(read_text_file(path, arg_loc(0), "keypair file")));
+                    return Value(sol::Keypair::from_json(read_text_file(path, a.loc(0), "keypair file")));
                 } catch (const std::invalid_argument& ex) {
-                    fail(arg_loc(0), "invalid keypair file '" + path.string() + "': " + ex.what());
+                    fail(a.loc(0), "invalid keypair file '" + path.string() + "': " + ex.what());
                 }
             }
             case BuiltinId::pubkey: {
-                auto p = Pubkey::from_base58(to_str(args[0], arg_loc(0), what(0)));
-                if (!p) fail(arg_loc(0), "invalid pubkey '" + args[0].as<std::string>() + "'");
+                std::string text = a.str(0);
+                auto p = Pubkey::from_base58(text);
+                if (!p) fail(a.loc(0), "invalid pubkey '" + text + "'");
                 return Value(*p);
             }
             case BuiltinId::pda:
             case BuiltinId::pda_bump: {
-                auto [addr, bump] = sol::find_program_address(seeds_of(args[1], arg_loc(1)), to_pubkey(args[0], arg_loc(0), what(0)));
+                auto [addr, bump] = sol::find_program_address(seeds_of(a[1], a.loc(1)), a.pubkey(0));
                 if (c.builtin == BuiltinId::pda) return Value(addr);
                 return Value(static_cast<__int128>(bump));
             }
             case BuiltinId::ata: {
-                Pubkey tp = args.size() > 2 ? to_pubkey(args[2], arg_loc(2), what(2)) : sol::ids::token_program;
-                return Value(sol::associated_token_address(to_pubkey(args[0], arg_loc(0), what(0)),
-                                                           to_pubkey(args[1], arg_loc(1), what(1)), tp));
+                Pubkey tp = a.size() > 2 ? a.pubkey(2) : sol::ids::token_program;
+                return Value(sol::associated_token_address(a.pubkey(0), a.pubkey(1), tp));
             }
             case BuiltinId::system_program: return Value(sol::ids::system_program);
             case BuiltinId::token_program: return Value(sol::ids::token_program);
@@ -1120,113 +1191,104 @@ struct Interpreter::Impl {
             case BuiltinId::hex:
             case BuiltinId::base64:
             case BuiltinId::base58: {
-                const std::string& s = to_str(args[0], arg_loc(0), what(0));
-                auto b = c.builtin == BuiltinId::hex ? sol::hex_decode(s) : c.builtin == BuiltinId::base64 ? sol::base64_decode(s) : sol::base58_decode(s);
-                if (!b) fail(arg_loc(0), "invalid " + name + " string");
+                std::string text = a.str(0);
+                auto b = c.builtin == BuiltinId::hex      ? sol::hex_decode(text)
+                         : c.builtin == BuiltinId::base64 ? sol::base64_decode(text)
+                                                          : sol::base58_decode(text);
+                if (!b) fail(a.loc(0), "invalid " + a.name + " string");
                 return Value(std::move(*b));
             }
-            case BuiltinId::utf8: {
-                const std::string& s = to_str(args[0], arg_loc(0), what(0));
-                return Value(Bytes(s.begin(), s.end()));
+            case BuiltinId::utf8:
+            case BuiltinId::memo: {
+                std::string text = a.str(0);
+                return Value(Bytes(text.begin(), text.end()));
             }
             case BuiltinId::sha256: {
-                sol::Hash h = args[0].is<std::string>() ? sol::sha256(sol::as_bytes(args[0].as<std::string>()))
-                                                        : sol::sha256(Codec::to_bytes(args[0], arg_loc(0), what(0)));
+                sol::Hash h = a[0].is<std::string>() ? sol::sha256(sol::as_bytes(a[0].as<std::string>())) : sol::sha256(a.bytes(0));
                 return Value(Bytes(h.begin(), h.end()));
             }
             case BuiltinId::file: {
-                std::string text = read_text_file(resolve_path(to_str(args[0], arg_loc(0), what(0))), arg_loc(0), "file");
+                std::string text = read_text_file(resolve_path(a.str(0)), a.loc(0), "file");
                 return Value(Bytes(text.begin(), text.end()));
             }
-            case BuiltinId::u8: return Value(Bytes{to_u8(args[0], arg_loc(0), what(0))});
-            case BuiltinId::u16_le: return Value(le_bytes(to_int(coerce(args[0], prog.types.int_(IntWidth::u16), arg_loc(0), what(0)), loc, ""), 2));
-            case BuiltinId::u32_le: return Value(le_bytes(to_int(coerce(args[0], prog.types.int_(IntWidth::u32), arg_loc(0), what(0)), loc, ""), 4));
-            case BuiltinId::u64_le: return Value(le_bytes(to_u64(args[0], arg_loc(0), what(0)), 8));
-            case BuiltinId::i64_le: return Value(le_bytes(to_int(coerce(args[0], prog.types.int_(IntWidth::i64), arg_loc(0), what(0)), loc, ""), 8));
+            case BuiltinId::u8: return Value(Bytes{a.u8(0)});
+            case BuiltinId::u16_le: return Value(le_bytes(a.int_as(0, IntWidth::u16), 2));
+            case BuiltinId::u32_le: return Value(le_bytes(a.int_as(0, IntWidth::u32), 4));
+            case BuiltinId::u64_le: return Value(le_bytes(a.u64(0), 8));
+            case BuiltinId::i64_le: return Value(le_bytes(a.int_as(0, IntWidth::i64), 8));
             case BuiltinId::borsh: {
-                const Symbol* s = want<SchemaV>(args[0], arg_loc(0), "a schema", what(0)).sym;
+                const Symbol* s = a.schema(0);
                 sol::BorshWriter w;
-                if (s->schema_format == "anchor") w.raw(sol::anchor_discriminator("account", s->name));
-                codec.encode(w, *codec.from_type(s->schema_record), coerce(args[1], s->schema_record, arg_loc(1), s->name), arg_loc(1), s->name);
+                if (s->schema_format == sema::SchemaFormat::anchor) w.raw(sol::anchor_discriminator("account", s->name));
+                codec.encode(w, *codec.from_type(s->schema_record), coerce(a[1], s->schema_record, a.loc(1), s->name), a.loc(1), s->name);
                 return Value(w.take());
             }
-            case BuiltinId::anchor: return Value(encode_anchor_account(args[0], args[1], arg_loc(1)));
+            case BuiltinId::anchor: return Value(encode_anchor_account(a[0], a[1], a.loc(1)));
             case BuiltinId::decode: {
-                const Symbol* s = want<SchemaV>(args[0], arg_loc(0), "a schema", what(0)).sym;
-                const Bytes data = Codec::to_bytes(args[1], arg_loc(1), what(1));
+                const Symbol* s = a.schema(0);
+                const Bytes data = a.bytes(1);
                 sol::BorshReader r(data);
                 try {
-                    if (s->schema_format == "anchor") {
+                    if (s->schema_format == sema::SchemaFormat::anchor) {
                         Bytes disc = r.raw(8);
                         auto expect_disc = sol::anchor_discriminator("account", s->name);
                         if (!std::equal(disc.begin(), disc.end(), expect_disc.begin()))
-                            fail(arg_loc(1), "data does not start with the anchor discriminator of '" + s->name + "'");
+                            fail(a.loc(1), "data does not start with the anchor discriminator of '" + s->name + "'");
                     }
                     return codec.decode(r, *codec.from_type(s->schema_record));
                 } catch (const sol::DecodeError& ex) {
-                    fail(arg_loc(1), "cannot decode data as '" + s->name + "': " + ex.what());
+                    fail(a.loc(1), "cannot decode data as '" + s->name + "': " + ex.what());
                 }
             }
             case BuiltinId::len:
-                if (args[0].is<std::string>()) return Value(static_cast<__int128>(args[0].as<std::string>().size()));
-                if (args[0].is<Bytes>()) return Value(static_cast<__int128>(args[0].as<Bytes>().size()));
-                return Value(static_cast<__int128>(want<ListP>(args[0], arg_loc(0), "a list", what(0))->size()));
-            case BuiltinId::str: return Value(format_value(args[0]));
+                if (a[0].is<std::string>()) return Value(static_cast<__int128>(a[0].as<std::string>().size()));
+                if (a[0].is<Bytes>()) return Value(static_cast<__int128>(a[0].as<Bytes>().size()));
+                return Value(static_cast<__int128>(want<ListP>(a[0], a.loc(0), "a list", a.what(0))->size()));
+            case BuiltinId::str: return Value(format_value(a[0]));
             case BuiltinId::print: {
                 std::string line;
-                for (std::size_t i = 0; i < args.size(); ++i) line += (i ? " " : "") + format_value(args[i]);
+                for (std::size_t i = 0; i < a.size(); ++i) line += (i ? " " : "") + format_value(a[i]);
                 out << line << "\n";
                 out.flush();
                 return Value();
             }
-            case BuiltinId::rent_exempt: {
-                std::uint64_t n = to_u64(args[0], arg_loc(0), what(0));
-                return Value(static_cast<__int128>(sol::rent_exempt_minimum(n)));
-            }
-            case BuiltinId::rpc: return Value(SourceV{to_str(args[0], arg_loc(0), what(0))});
-            case BuiltinId::readonly: return Value(MetaV{to_pubkey(args[0], arg_loc(0), what(0)), false, false});
-            case BuiltinId::writable: return Value(MetaV{to_pubkey(args[0], arg_loc(0), what(0)), false, true});
-            case BuiltinId::signer: {
-                bool w = args.size() < 2 || want<bool>(args[1], arg_loc(1), "a bool", what(1));
-                return Value(MetaV{to_pubkey(args[0], arg_loc(0), what(0)), true, w});
-            }
+            case BuiltinId::rent_exempt: return Value(static_cast<__int128>(sol::rent_exempt_minimum(a.u64(0))));
+            case BuiltinId::rpc: return Value(SourceV{a.str(0)});
+            case BuiltinId::readonly: return Value(MetaV{a.pubkey(0), false, false});
+            case BuiltinId::writable: return Value(MetaV{a.pubkey(0), false, true});
+            case BuiltinId::signer: return Value(MetaV{a.pubkey(0), true, a.size() < 2 || a.boolean(1)});
             case BuiltinId::sol: {
-                if (args[0].is<__int128>()) {
+                if (a[0].is<__int128>()) {
                     __int128 r;
-                    if (__builtin_mul_overflow(args[0].as<__int128>(), static_cast<__int128>(sol::lamports_per_sol), &r))
+                    if (__builtin_mul_overflow(a[0].as<__int128>(), static_cast<__int128>(sol::lamports_per_sol), &r))
                         fail(loc, "integer overflow");
                     return Value(r);
                 }
-                double d = to_double(args[0], arg_loc(0), what(0)) * static_cast<double>(sol::lamports_per_sol);
-                if (d != std::floor(d)) fail(arg_loc(0), "amount is not a whole number of lamports");
-                if (!(std::fabs(d) < 1.7e38)) fail(arg_loc(0), "amount is out of range");
+                double d = a.number(0) * static_cast<double>(sol::lamports_per_sol);
+                if (d != std::floor(d)) fail(a.loc(0), "amount is not a whole number of lamports");
+                if (!(std::fabs(d) < 1.7e38)) fail(a.loc(0), "amount is out of range");  // __int128 holds about 1.7e38
                 return Value(static_cast<__int128>(d));
             }
-            case BuiltinId::system_transfer: return Value(sol::system_transfer_data(to_u64(args[0], arg_loc(0), what(0))));
-            case BuiltinId::spl_transfer: return Value(sol::spl_transfer_data(to_u64(args[0], arg_loc(0), what(0))));
-            case BuiltinId::spl_mint_to: return Value(sol::spl_mint_to_data(to_u64(args[0], arg_loc(0), what(0))));
-            case BuiltinId::spl_transfer_checked:
-                return Value(sol::spl_transfer_checked_data(to_u64(args[0], arg_loc(0), what(0)), to_u8(args[1], arg_loc(1), what(1))));
-            case BuiltinId::memo: {
-                const std::string& s = to_str(args[0], arg_loc(0), what(0));
-                return Value(Bytes(s.begin(), s.end()));
-            }
+            case BuiltinId::system_transfer: return Value(sol::system_transfer_data(a.u64(0)));
+            case BuiltinId::spl_transfer: return Value(sol::spl_transfer_data(a.u64(0)));
+            case BuiltinId::spl_mint_to: return Value(sol::spl_mint_to_data(a.u64(0)));
+            case BuiltinId::spl_transfer_checked: return Value(sol::spl_transfer_checked_data(a.u64(0), a.u8(1)));
             case BuiltinId::balance: {
-                auto acc = query_account(to_pubkey(args[0], arg_loc(0), what(0)));
+                auto acc = query_account(a.pubkey(0));
                 return Value(static_cast<__int128>(acc ? acc->lamports : 0));
             }
             case BuiltinId::token_balance: {
-                const Pubkey& pk = to_pubkey(args[0], arg_loc(0), what(0));
+                Pubkey pk = a.pubkey(0);
                 auto acc = query_account(pk);
-                if (!acc) fail(arg_loc(0), "token account " + pk.base58() + " does not exist");
+                if (!acc) fail(a.loc(0), "token account " + pk.base58() + " does not exist");
                 if (acc->owner != sol::ids::token_program && acc->owner != sol::ids::token_2022_program)
-                    fail(arg_loc(0), "account " + pk.base58() + " is not owned by a token program");
+                    fail(a.loc(0), "account " + pk.base58() + " is not owned by a token program");
                 auto t = sol::decode_token_account(acc->data);
-                if (!t) fail(arg_loc(0), "account " + pk.base58() + " is not a token account");
+                if (!t) fail(a.loc(0), "account " + pk.base58() + " is not a token account");
                 return Value(static_cast<__int128>(t->amount));
             }
             case BuiltinId::account: {
-                auto acc = query_account(to_pubkey(args[0], arg_loc(0), what(0)));
+                auto acc = query_account(a.pubkey(0));
                 if (!acc) return Value(Null{});
                 return make_record({{"address", Value(acc->address)},
                                     {"lamports", Value(static_cast<__int128>(acc->lamports))},
@@ -1235,7 +1297,7 @@ struct Interpreter::Impl {
                                     {"executable", Value(acc->executable)},
                                     {"rent_epoch", Value(static_cast<__int128>(acc->rent_epoch))}});
             }
-            case BuiltinId::exists: return Value(query_account(to_pubkey(args[0], arg_loc(0), what(0))).has_value());
+            case BuiltinId::exists: return Value(query_account(a.pubkey(0)).has_value());
             case BuiltinId::slot: return Value(static_cast<__int128>(runtime->slot()));
             case BuiltinId::epoch: return Value(static_cast<__int128>(runtime->epoch()));
             case BuiltinId::none: break;
@@ -1270,9 +1332,7 @@ struct Interpreter::Impl {
         if (obj.is<ListP>()) {
             auto& lp = obj.as<ListP>();
             if (lp.use_count() > 1) lp = std::make_shared<std::vector<Value>>(*lp);
-            if (i < 0 || i >= static_cast<__int128>(lp->size()))
-                fail(e.loc, "index " + int_to_string(i) + " is out of bounds for a list of length " + std::to_string(lp->size()));
-            return (*lp)[static_cast<std::size_t>(i)];
+            return (*lp)[checked_index(i, lp->size(), e.loc, "a list")];
         }
         fail(e.loc, "this value cannot be assigned by index");
     }
@@ -1285,27 +1345,15 @@ struct Interpreter::Impl {
             if (obj.is<Bytes>()) {
                 __int128 i = to_int(eval(*ix->index), ix->index->loc, "index");
                 Bytes& b = obj.as<Bytes>();
-                if (i < 0 || i >= static_cast<__int128>(b.size())) fail(a.target->loc, "index out of bounds");
-                __int128 cur = b[static_cast<std::size_t>(i)];
-                if (a.op != AssignOp::set) v = arith(compound_op(a.op), Value(cur), v, a.value->loc);
-                b[static_cast<std::size_t>(i)] = to_u8(v, a.value->loc, "byte value");
+                std::size_t at = checked_index(i, b.size(), a.target->loc, "bytes");
+                if (a.op != AssignOp::set) v = arith(compound_op(a.op), Value(static_cast<__int128>(b[at])), v, a.value->loc);
+                b[at] = to_u8(v, a.value->loc, "byte value");
                 return;
             }
         }
         Value& target = lvalue(*a.target);
         if (a.op != AssignOp::set) v = arith(compound_op(a.op), target, v, a.value->loc);
         target = coerce(std::move(v), a.target->type, a.value->loc, "assignment");
-    }
-
-    static BinaryOp compound_op(AssignOp op) {
-        switch (op) {
-            case AssignOp::add: return BinaryOp::add;
-            case AssignOp::sub: return BinaryOp::sub;
-            case AssignOp::mul: return BinaryOp::mul;
-            case AssignOp::div: return BinaryOp::div;
-            case AssignOp::mod: return BinaryOp::mod;
-            default: return BinaryOp::add;
-        }
     }
 
     void exec_binding(const LetStmt& l) {
@@ -1319,16 +1367,8 @@ struct Interpreter::Impl {
     Flow scoped(F&& f) {
         Frame inner;
         inner.parent = frame;
-        Frame* saved = frame;
-        frame = &inner;
-        try {
-            Flow r = f();
-            frame = saved;
-            return r;
-        } catch (...) {
-            frame = saved;
-            throw;
-        }
+        Restore in_inner(frame, &inner);
+        return f();
     }
 
     // Library/backend exceptions (RPC failures, malformed JSON, ...) become
@@ -1444,7 +1484,7 @@ struct Interpreter::Impl {
                     while (!want<bool>(eval(*a.cond), a.cond->loc, "a bool", "await condition")) {
                         if (std::chrono::steady_clock::now() > deadline)
                             fail(s.loc, "await timed out after " + std::to_string(confirm_timeout_ms) + "ms");
-                        std::this_thread::sleep_for(std::chrono::milliseconds(400));
+                        std::this_thread::sleep_for(await_poll_interval);
                     }
                     return Flow::normal;
                 },
@@ -1497,9 +1537,24 @@ struct Interpreter::Impl {
         std::vector<Ext> extensions;
 
         const Value* get(const std::string& n) const {
+            read.insert(n);
             auto it = values.find(n);
             return it == values.end() ? nullptr : &it->second.first;
         }
+        // A field the checker guarantees (`required` in its sema field spec).
+        // Missing means sema and the interpreter disagree: an internal error,
+        // never a null dereference.
+        const Value& require(const std::string& n) const {
+            const Value* v = get(n);
+            if (!v) throw std::logic_error("internal error: required field '" + n + "' is missing (sema field spec out of sync)");
+            return *v;
+        }
+        // Every field the checker accepted must have been consumed by now.
+        void check_all_read(std::string_view block) const {
+            for (const auto& [n, _] : values)
+                if (!read.count(n)) unhandled_key(block, n);
+        }
+        mutable std::set<std::string> read;
         Loc loc(const std::string& n, Loc fallback) const {
             auto it = values.find(n);
             return it == values.end() ? fallback : it->second.second;
@@ -1521,7 +1576,7 @@ struct Interpreter::Impl {
     }
 
     void claim(const Pubkey& addr, Loc loc, const std::string& kind) {
-        auto [it, ok] = declared.try_emplace(addr, Declared{loc, kind});
+        auto [it, ok] = ledger.declared.try_emplace(addr, GenesisLedger::Declared{loc, kind});
         if (!ok) {
             TideError err(loc, "address " + addr.base58() + " is already defined in genesis (as " + it->second.kind + ")");
             err.notes.push_back({it->second.loc, "previous definition is here"});
@@ -1598,107 +1653,115 @@ struct Interpreter::Impl {
 
     void exec_entity(const Stmt& s, const EntityDecl& d) {
         FieldVals f = eval_fields(d.fields);
-        Loc loc = s.loc;
         switch (d.kind) {
-            case EntityKind::account: {
-                Pubkey addr = to_pubkey(eval(*d.target), d.target->loc, "account address");
-                Bytes data = f.get("data") ? Codec::to_bytes(*f.get("data"), f.loc("data", loc), "field 'data'") : Bytes{};
-                Pubkey owner = f.get("owner") ? to_pubkey(*f.get("owner"), f.loc("owner", loc), "owner") : sol::ids::system_program;
-                bool exe = f.get("executable") ? want<bool>(*f.get("executable"), f.loc("executable", loc), "a bool", "executable") : false;
-                put(addr, opt_u64(f, "lamports", 0, loc), owner, std::move(data), exe, opt_u64(f, "rent_epoch", 0, loc), d.target->loc, "account");
-                break;
-            }
-            case EntityKind::program: {
-                backend::ProgramSpec spec;
-                spec.name = d.label.name;
-                spec.origin = loc;
-                spec.id = to_pubkey(*f.get("id"), f.loc("id", loc), "program id");
-                spec.binary = resolve_path(to_str(*f.get("binary"), f.loc("binary", loc), "program binary"));
-                if (!std::filesystem::exists(spec.binary))
-                    fail(f.loc("binary", loc), "program binary '" + spec.binary.string() + "' does not exist");
-                spec.loader = f.get("loader") ? to_pubkey(*f.get("loader"), f.loc("loader", loc), "loader") : sol::ids::bpf_upgradeable_loader;
-                if (spec.loader != sol::ids::bpf_loader && spec.loader != sol::ids::bpf_loader_deprecated &&
-                    spec.loader != sol::ids::bpf_upgradeable_loader && spec.loader != sol::ids::loader_v4)
-                    fail(f.loc("loader", loc), "unknown loader " + spec.loader.base58() +
-                                                   "; expected bpf_loader(), bpf_loader_deprecated(), bpf_upgradeable_loader() or loader_v4()");
-                spec.upgrade_authority = opt_authority(f, "upgrade_authority", loc);
-                if (spec.upgrade_authority && spec.loader != sol::ids::bpf_upgradeable_loader && spec.loader != sol::ids::loader_v4)
-                    fail(f.loc("upgrade_authority", loc), "upgrade_authority requires an upgradeable loader (bpf_upgradeable_loader() or loader_v4())");
-                if (const Value* idl = f.get("idl")) {
-                    spec.idl = resolve_path(to_str(*idl, f.loc("idl", loc), "idl"));
-                    if (!std::filesystem::exists(*spec.idl)) fail(f.loc("idl", loc), "IDL file '" + spec.idl->string() + "' does not exist");
-                    load_idl(*spec.idl, f.loc("idl", loc));
-                    program_idls[spec.id] = *spec.idl;
-                }
-                claim(spec.id, d.label.loc, "program '" + spec.name + "'");
-                genesis->put_program(spec);
-                break;
-            }
-            case EntityKind::mint: {
-                Pubkey addr = to_pubkey(eval(*d.target), d.target->loc, "mint address");
-                Pubkey tp = token_program_of(f, loc);
-                sol::MintLayout m;
-                m.decimals = to_u8(*f.get("decimals"), f.loc("decimals", loc), "decimals");
-                m.mint_authority = opt_authority(f, "mint_authority", loc);
-                m.freeze_authority = opt_authority(f, "freeze_authority", loc);
-                m.supply = opt_u64(f, "supply", 0, loc);
-                m.extensions = extensions_of(f, tp);
-                Bytes data = sol::encode_mint(m);
-                std::uint64_t lamports = opt_u64(f, "lamports", sol::rent_exempt_minimum(data.size()), loc);
-                mints[addr] = {tp, m.supply, d.target->loc};
-                put(addr, lamports, tp, std::move(data), false, 0, d.target->loc, "mint");
-                break;
-            }
+            case EntityKind::account: put_plain_account(d, f, s.loc); break;
+            case EntityKind::program: put_program(d, f, s.loc); break;
+            case EntityKind::mint: put_mint(d, f, s.loc); break;
             case EntityKind::token_account:
-            case EntityKind::associated_token_account: {
-                bool ata = d.kind == EntityKind::associated_token_account;
-                Pubkey addr = to_pubkey(eval(*d.target), d.target->loc, "token account address");
-                Pubkey tp = token_program_of(f, loc);
-                sol::TokenAccountLayout a;
-                a.mint = to_pubkey(*f.get("mint"), f.loc("mint", loc), "mint");
-                a.owner = to_pubkey(*f.get("owner"), f.loc("owner", loc), "owner");
-                a.amount = opt_u64(f, "amount", 0, loc);
-                if (ata) {
-                    Pubkey expected = sol::associated_token_address(a.owner, a.mint, tp);
-                    if (expected != addr)
-                        fail(d.target->loc, "address " + addr.base58() + " is not the associated token account of owner " +
-                                                a.owner.base58() + " for mint " + a.mint.base58() + " (expected " + expected.base58() + ")");
-                    if (tp == sol::ids::token_2022_program) a.extensions.push_back({sol::ExtensionType::immutable_owner, {}});
-                } else {
-                    a.delegate = opt_authority(f, "delegate", loc);
-                    a.delegated_amount = opt_u64(f, "delegated_amount", 0, loc);
-                    if (a.delegated_amount > 0 && !a.delegate)
-                        fail(f.loc("delegated_amount", loc), "delegated_amount is set but the account has no delegate");
-                    if (a.delegated_amount > a.amount)
-                        fail(f.loc("delegated_amount", loc), "delegated_amount (" + std::to_string(a.delegated_amount) +
-                                                                 ") exceeds the account amount (" + std::to_string(a.amount) + ")");
-                    if (const Value* st = f.get("state")) a.state = token_state(*st, f.loc("state", loc));
-                    a.close_authority = opt_authority(f, "close_authority", loc);
-                    auto exts = extensions_of(f, tp);
-                    a.extensions.insert(a.extensions.end(), exts.begin(), exts.end());
-                }
-                Bytes data = sol::encode_token_account(a);
-                std::uint64_t lamports = opt_u64(f, "lamports", sol::rent_exempt_minimum(data.size()), loc);
-                token_accounts.push_back({addr, a.mint, tp, a.amount, d.target->loc});
-                put(addr, lamports, tp, std::move(data), false, 0, d.target->loc, ata ? "associated token account" : "token account");
-                break;
-            }
-            case EntityKind::lookup_table: {
-                Pubkey addr = to_pubkey(eval(*d.target), d.target->loc, "lookup table address");
-                sol::LookupTableLayout t;
-                t.authority = opt_authority(f, "authority", loc);
-                t.deactivation_slot = opt_u64(f, "deactivation_slot", UINT64_MAX, loc);
-                t.last_extended_slot = opt_u64(f, "last_extended_slot", 0, loc);
-                if (const Value* addrs = f.get("addresses"))
-                    for (const auto& a : *want<ListP>(*addrs, f.loc("addresses", loc), "a list", "addresses"))
-                        t.addresses.push_back(to_pubkey(a, f.loc("addresses", loc), "lookup table address"));
-                if (t.addresses.size() > 256) fail(f.loc("addresses", loc), "a lookup table holds at most 256 addresses");
-                Bytes data = sol::encode_lookup_table(t);
-                std::uint64_t lamports = opt_u64(f, "lamports", sol::rent_exempt_minimum(data.size()), loc);
-                put(addr, lamports, sol::ids::address_lookup_table_program, std::move(data), false, 0, d.target->loc, "lookup table");
-                break;
-            }
+            case EntityKind::associated_token_account: put_token_account(d, f, s.loc); break;
+            case EntityKind::lookup_table: put_lookup_table(d, f, s.loc); break;
         }
+        f.check_all_read("genesis entity");
+    }
+
+    void put_plain_account(const EntityDecl& d, const FieldVals& f, Loc loc) {
+        Pubkey addr = to_pubkey(eval(*d.target), d.target->loc, "account address");
+        Bytes data = f.get("data") ? Codec::to_bytes(*f.get("data"), f.loc("data", loc), "field 'data'") : Bytes{};
+        Pubkey owner = f.get("owner") ? to_pubkey(*f.get("owner"), f.loc("owner", loc), "owner") : sol::ids::system_program;
+        bool exe = f.get("executable") ? want<bool>(*f.get("executable"), f.loc("executable", loc), "a bool", "executable") : false;
+        put(addr, opt_u64(f, "lamports", 0, loc), owner, std::move(data), exe, opt_u64(f, "rent_epoch", 0, loc), d.target->loc, "account");
+    }
+
+    void put_program(const EntityDecl& d, const FieldVals& f, Loc loc) {
+        backend::ProgramSpec spec;
+        spec.name = d.label.name;
+        spec.origin = loc;
+        spec.id = to_pubkey(f.require("id"), f.loc("id", loc), "program id");
+        spec.binary = resolve_path(to_str(f.require("binary"), f.loc("binary", loc), "program binary"));
+        if (!std::filesystem::exists(spec.binary))
+            fail(f.loc("binary", loc), "program binary '" + spec.binary.string() + "' does not exist");
+        spec.loader = f.get("loader") ? to_pubkey(*f.get("loader"), f.loc("loader", loc), "loader") : sol::ids::bpf_upgradeable_loader;
+        if (spec.loader != sol::ids::bpf_loader && spec.loader != sol::ids::bpf_loader_deprecated &&
+            spec.loader != sol::ids::bpf_upgradeable_loader && spec.loader != sol::ids::loader_v4)
+            fail(f.loc("loader", loc), "unknown loader " + spec.loader.base58() +
+                                           "; expected bpf_loader(), bpf_loader_deprecated(), bpf_upgradeable_loader() or loader_v4()");
+        spec.upgrade_authority = opt_authority(f, "upgrade_authority", loc);
+        if (spec.upgrade_authority && spec.loader != sol::ids::bpf_upgradeable_loader && spec.loader != sol::ids::loader_v4)
+            fail(f.loc("upgrade_authority", loc), "upgrade_authority requires an upgradeable loader (bpf_upgradeable_loader() or loader_v4())");
+        if (const Value* idl = f.get("idl")) {
+            spec.idl = resolve_path(to_str(*idl, f.loc("idl", loc), "idl"));
+            if (!std::filesystem::exists(*spec.idl)) fail(f.loc("idl", loc), "IDL file '" + spec.idl->string() + "' does not exist");
+            load_idl(*spec.idl, f.loc("idl", loc));
+            ledger.program_idls[spec.id] = *spec.idl;
+        }
+        claim(spec.id, d.label.loc, "program '" + spec.name + "'");
+        genesis->put_program(spec);
+    }
+
+    void put_mint(const EntityDecl& d, const FieldVals& f, Loc loc) {
+        Pubkey addr = to_pubkey(eval(*d.target), d.target->loc, "mint address");
+        Pubkey tp = token_program_of(f, loc);
+        sol::MintLayout m;
+        m.decimals = to_u8(f.require("decimals"), f.loc("decimals", loc), "decimals");
+        m.mint_authority = opt_authority(f, "mint_authority", loc);
+        m.freeze_authority = opt_authority(f, "freeze_authority", loc);
+        m.supply = opt_u64(f, "supply", 0, loc);
+        m.extensions = extensions_of(f, tp);
+        Bytes data = sol::encode_mint(m);
+        std::uint64_t lamports = opt_u64(f, "lamports", sol::rent_exempt_minimum(data.size()), loc);
+        ledger.mints[addr] = {tp, m.supply, d.target->loc};
+        put(addr, lamports, tp, std::move(data), false, 0, d.target->loc, "mint");
+    }
+
+    // Plain token accounts and associated token accounts (whose address must
+    // be the derived one, and which take no delegate/state/extension fields).
+    void put_token_account(const EntityDecl& d, const FieldVals& f, Loc loc) {
+        bool ata = d.kind == EntityKind::associated_token_account;
+        Pubkey addr = to_pubkey(eval(*d.target), d.target->loc, "token account address");
+        Pubkey tp = token_program_of(f, loc);
+        sol::TokenAccountLayout a;
+        a.mint = to_pubkey(f.require("mint"), f.loc("mint", loc), "mint");
+        a.owner = to_pubkey(f.require("owner"), f.loc("owner", loc), "owner");
+        a.amount = opt_u64(f, "amount", 0, loc);
+        if (ata) {
+            Pubkey expected = sol::associated_token_address(a.owner, a.mint, tp);
+            if (expected != addr)
+                fail(d.target->loc, "address " + addr.base58() + " is not the associated token account of owner " +
+                                        a.owner.base58() + " for mint " + a.mint.base58() + " (expected " + expected.base58() + ")");
+            if (tp == sol::ids::token_2022_program) a.extensions.push_back({sol::ExtensionType::immutable_owner, {}});
+        } else {
+            a.delegate = opt_authority(f, "delegate", loc);
+            a.delegated_amount = opt_u64(f, "delegated_amount", 0, loc);
+            if (a.delegated_amount > 0 && !a.delegate)
+                fail(f.loc("delegated_amount", loc), "delegated_amount is set but the account has no delegate");
+            if (a.delegated_amount > a.amount)
+                fail(f.loc("delegated_amount", loc), "delegated_amount (" + std::to_string(a.delegated_amount) +
+                                                         ") exceeds the account amount (" + std::to_string(a.amount) + ")");
+            if (const Value* st = f.get("state")) a.state = token_state(*st, f.loc("state", loc));
+            a.close_authority = opt_authority(f, "close_authority", loc);
+            auto exts = extensions_of(f, tp);
+            a.extensions.insert(a.extensions.end(), exts.begin(), exts.end());
+        }
+        Bytes data = sol::encode_token_account(a);
+        std::uint64_t lamports = opt_u64(f, "lamports", sol::rent_exempt_minimum(data.size()), loc);
+        ledger.token_accounts.push_back({addr, a.mint, tp, a.amount, d.target->loc});
+        put(addr, lamports, tp, std::move(data), false, 0, d.target->loc, ata ? "associated token account" : "token account");
+    }
+
+    void put_lookup_table(const EntityDecl& d, const FieldVals& f, Loc loc) {
+        Pubkey addr = to_pubkey(eval(*d.target), d.target->loc, "lookup table address");
+        sol::LookupTableLayout t;
+        t.authority = opt_authority(f, "authority", loc);
+        t.deactivation_slot = opt_u64(f, "deactivation_slot", UINT64_MAX, loc);
+        t.last_extended_slot = opt_u64(f, "last_extended_slot", 0, loc);
+        if (const Value* addrs = f.get("addresses"))
+            for (const auto& a : *want<ListP>(*addrs, f.loc("addresses", loc), "a list", "addresses"))
+                t.addresses.push_back(to_pubkey(a, f.loc("addresses", loc), "lookup table address"));
+        if (t.addresses.size() > max_lookup_table_addresses)
+            fail(f.loc("addresses", loc), "a lookup table holds at most " + std::to_string(max_lookup_table_addresses) + " addresses");
+        Bytes data = sol::encode_lookup_table(t);
+        std::uint64_t lamports = opt_u64(f, "lamports", sol::rent_exempt_minimum(data.size()), loc);
+        put(addr, lamports, sol::ids::address_lookup_table_program, std::move(data), false, 0, d.target->loc, "lookup table");
     }
 
     void exec_sysvar(const Stmt& s, const SysvarDecl& d) {
@@ -1727,6 +1790,7 @@ struct Interpreter::Impl {
             if (const Value* o = f.get("owner")) spec.overrides.owner = to_pubkey(*o, f.loc("owner", s.loc), "owner");
             if (const Value* dv = f.get("data")) spec.overrides.data = Codec::to_bytes(*dv, f.loc("data", s.loc), "field 'data'");
             if (const Value* e = f.get("executable")) spec.overrides.executable = want<bool>(*e, f.loc("executable", s.loc), "a bool", "executable");
+            f.check_all_read("clone overrides");
         }
         claim(spec.address, c.target->loc, c.program ? "cloned program" : "cloned account");
         genesis->clone_account(spec);
@@ -1734,22 +1798,22 @@ struct Interpreter::Impl {
 
     void exec_delete(const Stmt& s, const DeleteDecl& d) {
         Pubkey addr = to_pubkey(eval(*d.target), d.target->loc, "delete target");
-        auto it = declared.find(addr);
-        if (it == declared.end())
+        auto it = ledger.declared.find(addr);
+        if (it == ledger.declared.end())
             fail(d.target->loc, "cannot delete " + addr.base58() + ": it is not defined earlier in this genesis");
-        declared.erase(it);
+        ledger.declared.erase(it);
         genesis->remove_account({addr, d.program, s.loc});
-        mints.erase(addr);
-        std::erase_if(token_accounts, [&](const TokenInfo& t) { return t.address == addr; });
+        ledger.mints.erase(addr);
+        std::erase_if(ledger.token_accounts, [&](const GenesisLedger::TokenInfo& t) { return t.address == addr; });
     }
 
     // Cross-declaration checks once genesis is complete.
     void validate_genesis() {
         std::map<Pubkey, unsigned __int128> totals;
-        for (const auto& t : token_accounts) {
-            auto m = mints.find(t.mint);
-            if (m == mints.end()) {
-                if (!declared.count(t.mint))
+        for (const auto& t : ledger.token_accounts) {
+            auto m = ledger.mints.find(t.mint);
+            if (m == ledger.mints.end()) {
+                if (!ledger.declared.count(t.mint))
                     diags.warning(t.loc, "token account " + t.address.base58() + " refers to mint " + t.mint.base58() +
                                              ", which is not defined in genesis");
                 continue;
@@ -1761,7 +1825,7 @@ struct Interpreter::Impl {
             }
             totals[t.mint] += t.amount;
         }
-        for (const auto& [addr, m] : mints) {
+        for (const auto& [addr, m] : ledger.mints) {
             unsigned __int128 total = totals.count(addr) ? totals[addr] : 0;
             if (total != m.supply)
                 diags.warning(m.loc, "mint " + addr.base58() + " has supply " + std::to_string(m.supply) +
@@ -1770,11 +1834,6 @@ struct Interpreter::Impl {
     }
 
     // --------------------------------------------------------- runtime --
-
-    struct Signing {
-        std::vector<sol::Keypair> signers;
-        std::optional<Pubkey> fee_payer;
-    };
 
     std::vector<sol::Keypair> keypairs_of(const Value& v, Loc loc) {
         std::vector<sol::Keypair> out;
@@ -1795,6 +1854,14 @@ struct Interpreter::Impl {
         }
         const Pubkey& p = to_pubkey(v, loc, "instruction account");
         return {p, is_signer(p), true};
+    }
+
+    // Shared by `transaction` and `invoke`: the explicit fee payer, else the first signer.
+    Pubkey resolve_fee_payer(const std::optional<Pubkey>& explicit_payer, const std::vector<sol::Keypair>& signers,
+                             Loc loc, const char* statement) {
+        if (explicit_payer) return *explicit_payer;
+        if (signers.empty()) fail(loc, std::string(statement) + " needs 'fee_payer' or at least one entry in 'signers'");
+        return signers.front().pubkey;
     }
 
     backend::TxResult send(backend::TransactionRequest req, Loc loc) {
@@ -1822,14 +1889,11 @@ struct Interpreter::Impl {
             Value v = eval(*e.value);
             if (e.key == "fee_payer") fee_payer = to_pubkey(v, e.value->loc, "fee_payer");
             else if (e.key == "signers") req.signers = keypairs_of(v, e.value->loc);
-            else if (e.key == "compute_unit_limit") req.compute_unit_limit = static_cast<std::uint32_t>(to_u64(v, e.value->loc, "compute_unit_limit"));
+            else if (e.key == "compute_unit_limit") req.compute_unit_limit = to_u32(v, e.value->loc, "compute_unit_limit");
             else if (e.key == "compute_unit_price") req.compute_unit_price = to_u64(v, e.value->loc, "compute_unit_price");
+            else unhandled_key("transaction", e.key);
         }
-        if (!fee_payer) {
-            if (req.signers.empty()) fail(s.loc, "transaction needs 'fee_payer' or at least one entry in 'signers'");
-            fee_payer = req.signers.front().pubkey;
-        }
-        req.fee_payer = *fee_payer;
+        req.fee_payer = resolve_fee_payer(fee_payer, req.signers, s.loc, "transaction");
         for (const auto& e : t.entries) {
             if (!e.is_instruction) continue;
             sol::Instruction ix;
@@ -1840,6 +1904,7 @@ struct Interpreter::Impl {
                     for (const auto& a : *want<ListP>(v, entry.value->loc, "a list", "accounts"))
                         ix.accounts.push_back(meta_of(a, req.signers, req.fee_payer, entry.value->loc));
                 else if (entry.key == "data") ix.data = Codec::to_bytes(v, entry.value->loc, "instruction data");
+                else unhandled_key("instruction", entry.key);
             }
             req.instructions.push_back(std::move(ix));
         }
@@ -1864,10 +1929,10 @@ struct Interpreter::Impl {
         Pubkey program = to_pubkey(eval(*inv.program), inv.program->loc, "invoked program");
         FieldVals f = eval_fields(inv.with.entries);
         Loc loc = s.loc;
-        std::string method = to_str(*f.get("method"), f.loc("method", loc), "method");
+        std::string method = to_str(f.require("method"), f.loc("method", loc), "method");
         std::filesystem::path idl_path;
         if (const Value* p = f.get("idl")) idl_path = resolve_path(to_str(*p, f.loc("idl", loc), "idl"));
-        else if (auto it = program_idls.find(program); it != program_idls.end()) idl_path = it->second;
+        else if (auto it = ledger.program_idls.find(program); it != ledger.program_idls.end()) idl_path = it->second;
         else fail(inv.program->loc, "no IDL known for program " + program.base58() +
                                         "; add 'idl = \"...\";' to its genesis program declaration or to this invoke");
         const Json& idl = load_idl(idl_path, loc);
@@ -1875,7 +1940,7 @@ struct Interpreter::Impl {
         const Json* ix = nullptr;
         if (idl.contains("instructions"))  // iterate the IDL itself: value() would return a copy
             for (const auto& candidate : idl["instructions"])
-                if (snake_case(candidate.value("name", "")) == snake_case(method)) ix = &candidate;
+                if (same_name(candidate.value("name", ""), method)) ix = &candidate;
         if (!ix) fail(f.loc("method", loc), "IDL '" + idl_path.filename().string() + "' has no instruction '" + method + "'");
 
         sol::BorshWriter w;
@@ -1890,10 +1955,7 @@ struct Interpreter::Impl {
         for (const auto& a : ix->value("args", Json::array())) {
             std::string an = a.value("name", "");
             idl_args.push_back(an);
-            const Value* v = arg_rec.find(an);
-            if (!v)
-                for (const auto& [n, val] : arg_rec.fields)
-                    if (snake_case(n) == snake_case(an)) v = &val;
+            const Value* v = find_field(arg_rec, an);
             if (!v) {
                 const std::string ctx = "argument '" + an + "'";
                 const Json& at = json_member(a, "type", f.loc("args", loc), ctx);
@@ -1905,17 +1967,13 @@ struct Interpreter::Impl {
             }
             codec.encode(w, *codec.from_idl(idl, json_member(a, "type", loc, "argument '" + an + "'"), f.loc("args", loc)), *v, f.loc("args", loc), "argument '" + an + "'");
         }
-        for (const auto& [n, _] : arg_rec.fields) {
-            bool known = false;
-            for (const auto& an : idl_args) known |= snake_case(an) == snake_case(n);
-            if (!known) fail(f.loc("args", loc), "instruction '" + method + "' has no argument '" + n + "'");
-        }
+        if (const std::string* n = first_unknown_field(arg_rec, idl_args))
+            fail(f.loc("args", loc), "instruction '" + method + "' has no argument '" + *n + "'");
 
         std::vector<sol::Keypair> signers = f.get("signers") ? keypairs_of(*f.get("signers"), f.loc("signers", loc)) : std::vector<sol::Keypair>{};
-        Pubkey fee_payer;
-        if (const Value* fp = f.get("fee_payer")) fee_payer = to_pubkey(*fp, f.loc("fee_payer", loc), "fee_payer");
-        else if (!signers.empty()) fee_payer = signers.front().pubkey;
-        else fail(loc, "invoke needs 'fee_payer' or at least one entry in 'signers'");
+        std::optional<Pubkey> explicit_payer;
+        if (const Value* fp = f.get("fee_payer")) explicit_payer = to_pubkey(*fp, f.loc("fee_payer", loc), "fee_payer");
+        Pubkey fee_payer = resolve_fee_payer(explicit_payer, signers, loc, "invoke");
 
         Value accounts_v = f.get("accounts") ? *f.get("accounts") : make_record({});
         const auto& acc_rec = *want<RecordP>(accounts_v, f.loc("accounts", loc), "an object", "accounts");
@@ -1933,10 +1991,7 @@ struct Interpreter::Impl {
                 bool writable = a.value("writable", a.value("isMut", false));
                 bool is_signer = a.value("signer", a.value("isSigner", false));
                 bool optional = a.value("optional", a.value("isOptional", false));
-                const Value* v = acc_rec.find(an);
-                if (!v)
-                    for (const auto& [n, val] : acc_rec.fields)
-                        if (snake_case(n) == snake_case(an)) v = &val;
+                const Value* v = find_field(acc_rec, an);
                 Pubkey key;
                 if (v) {
                     used.push_back(an);
@@ -1961,11 +2016,8 @@ struct Interpreter::Impl {
             }
         };
         add_accounts(ix->value("accounts", Json::array()));
-        for (const auto& [n, _] : acc_rec.fields) {
-            bool known = false;
-            for (const auto& u : used) known |= u == n || snake_case(u) == snake_case(n);
-            if (!known) fail(f.loc("accounts", loc), "instruction '" + method + "' has no account named '" + n + "'");
-        }
+        if (const std::string* n = first_unknown_field(acc_rec, used))
+            fail(f.loc("accounts", loc), "instruction '" + method + "' has no account named '" + *n + "'");
         if (const Value* rem = f.get("remaining_accounts"))
             for (const auto& a : *want<ListP>(*rem, f.loc("remaining_accounts", loc), "a list", "remaining_accounts"))
                 instr.accounts.push_back(meta_of(a, signers, fee_payer, f.loc("remaining_accounts", loc)));
@@ -1976,7 +2028,8 @@ struct Interpreter::Impl {
         req.signers = std::move(signers);
         req.instructions.push_back(std::move(instr));
         if (const Value* cu = f.get("compute_unit_limit"))
-            req.compute_unit_limit = static_cast<std::uint32_t>(to_u64(*cu, f.loc("compute_unit_limit", loc), "compute_unit_limit"));
+            req.compute_unit_limit = to_u32(*cu, f.loc("compute_unit_limit", loc), "compute_unit_limit");
+        f.check_all_read("invoke");
         auto r = send(std::move(req), loc);
         if (!r.success) fail(loc, "invoke of '" + method + "' failed: " + failure_text(r));
         out << "    invoked " << method << ": " << r.signature << "\n";
@@ -1995,7 +2048,6 @@ struct Interpreter::Impl {
                     Value v = eval(*entry.value);
                     Loc l = entry.value->loc;
                     const std::string& k = entry.key;
-                    cfg.option_origins[k] = entry.loc;
                     if (k == "slots_per_epoch") cfg.slots_per_epoch = to_u64(v, l, k);
                     else if (k == "ticks_per_slot") cfg.ticks_per_slot = to_u64(v, l, k);
                     else if (k == "compute_unit_limit") cfg.compute_unit_limit = to_u64(v, l, k);
@@ -2006,6 +2058,7 @@ struct Interpreter::Impl {
                     else if (k == "bind_address") cfg.bind_address = to_str(v, l, k);
                     else if (k == "startup_timeout") cfg.startup_timeout_ms = want<Duration>(v, l, "a duration", k).ms;
                     else if (k == "confirm_timeout") cfg.confirm_timeout_ms = want<Duration>(v, l, "a duration", k).ms;
+                    else unhandled_key("options", k);
                 }
             } else if (const auto* vd = std::get_if<ValidatorEntry>(&e.node)) {
                 backend::ValidatorConfig vc;
@@ -2026,6 +2079,7 @@ struct Interpreter::Impl {
                     else if (k == "dynamic_port_range") vc.dynamic_port_range = to_str(v, l, k);
                     else if (k == "bind_address") vc.bind_address = to_str(v, l, k);
                     else if (k == "identity") vc.identity = want<sol::Keypair>(v, l, "a keypair", k);
+                    else unhandled_key("validator", k);
                 }
                 cfg.validators.push_back(std::move(vc));
             }
@@ -2034,19 +2088,22 @@ struct Interpreter::Impl {
         return cfg;
     }
 
-    void report(const TideError& e, const std::string& prefix = {}) {
-        auto& d = diags.error(e.loc, prefix + e.what());
-        for (const auto& n : e.notes) d.notes.push_back(n);
+    // An exception that escaped execution, as a diagnostic. A TideError carries
+    // its own location and notes; anything else is reported at `fallback`.
+    void report(const std::exception& e, const std::string& prefix = {}, Loc fallback = {}) {
+        if (const auto* te = dynamic_cast<const TideError*>(&e)) {
+            auto& d = diags.error(te->loc, prefix + te->what());
+            for (const auto& n : te->notes) d.notes.push_back(n);
+        } else {
+            diags.error(fallback, prefix + e.what());
+        }
     }
 
     RunResult run(const NetworkDecl& net, backend::NetworkBackend& be, const RunOptions& opts) {
         RunResult res;
-        declared.clear();
-        mints.clear();
-        token_accounts.clear();
-        program_idls.clear();
+        ledger = {};
         Frame net_frame;
-        frame = &net_frame;
+        Restore in_network(frame, &net_frame);
         try {
             // Network-level bindings.
             for (const auto& e : net.entries)
@@ -2057,15 +2114,16 @@ struct Interpreter::Impl {
             be.configure(build_config(net));
 
             // Genesis.
-            genesis = &be.genesis();
-            for (const auto& e : net.entries)
-                if (const auto* g = std::get_if<GenesisEntry>(&e.node)) {
-                    out << "==> building genesis state\n";
-                    scoped([&] { return exec_block(g->body); });
-                }
-            validate_genesis();
-            genesis = nullptr;
-            out << "    " << declared.size() << " genesis account(s) defined\n";
+            {
+                Restore building(genesis, &be.genesis());
+                for (const auto& e : net.entries)
+                    if (const auto* g = std::get_if<GenesisEntry>(&e.node)) {
+                        out << "==> building genesis state\n";
+                        scoped([&] { return exec_block(g->body); });
+                    }
+                validate_genesis();
+            }
+            out << "    " << ledger.declared.size() << " genesis account(s) defined\n";
 
             // Bootstrap on a private instance.
             const BootstrapEntry* bootstrap = nullptr;
@@ -2075,14 +2133,12 @@ struct Interpreter::Impl {
                 be.persist();
                 out << "==> dry run: state persisted; bootstrap, launch and scenarios skipped\n";
                 res.ok = true;
-                frame = nullptr;
                 return res;
             }
             if (bootstrap) {
                 out << "==> running bootstrap\n";
-                runtime = &be.start_bootstrap();
+                Restore bootstrapping(runtime, &be.start_bootstrap());
                 scoped([&] { return exec_block(bootstrap->body); });
-                runtime = nullptr;
             }
 
             out << "==> persisting state\n";
@@ -2101,34 +2157,23 @@ struct Interpreter::Impl {
                         continue;
                     ++res.scenarios_run;
                     out << "==> scenario '" << sc->name.name << "'\n";
-                    runtime = &client;
+                    Restore live(runtime, &client);
                     try {
                         scoped([&] { return exec_block(sc->body); });
                         out << "    scenario '" << sc->name.name << "' passed\n";
-                    } catch (const TideError& err) {
+                    } catch (const std::exception& err) {  // never take the launched network down
                         ++res.scenarios_failed;
-                        report(err, "scenario '" + sc->name.name + "' failed: ");
-                        out << "    scenario '" << sc->name.name << "' FAILED\n";
-                    } catch (const std::exception& ex) {  // never take the launched network down
-                        ++res.scenarios_failed;
-                        diags.error(sc->name.loc, "scenario '" + sc->name.name + "' failed: " + ex.what());
+                        report(err, "scenario '" + sc->name.name + "' failed: ", sc->name.loc);
                         out << "    scenario '" << sc->name.name << "' FAILED\n";
                     }
-                    runtime = nullptr;
                 }
             }
             res.launch = be.detach();
             res.ok = true;
-        } catch (const TideError& err) {
+        } catch (const std::exception& err) {
             report(err);
             be.abort();
-        } catch (const std::exception& ex) {
-            diags.error(Loc{}, ex.what());
-            be.abort();
         }
-        genesis = nullptr;
-        runtime = nullptr;
-        frame = nullptr;
         return res;
     }
 };
@@ -2143,10 +2188,8 @@ bool Interpreter::init_globals() {
             for (const auto& d : m->doc->decls)
                 if (const auto* l = std::get_if<LetStmt>(&d.node)) impl_->exec_binding(*l);
         return true;
-    } catch (const TideError& e) {
-        impl_->report(e);
     } catch (const std::exception& e) {
-        impl_->diags.error(Loc{}, e.what());
+        impl_->report(e);
     }
     return false;
 }

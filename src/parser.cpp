@@ -31,38 +31,31 @@ constexpr auto ws = dsl::ascii::space | LEXY_LIT("//") >> dsl::until(dsl::newlin
 
 constexpr auto id = dsl::identifier(dsl::ascii::alpha_underscore, dsl::ascii::alpha_digit_underscore);
 
-#define TIDE_KW(name) constexpr auto kw_##name = LEXY_KEYWORD(#name, id)
-// Reserved.
-TIDE_KW(import); TIDE_KW(as); TIDE_KW(source); TIDE_KW(keypair); TIDE_KW(let); TIDE_KW(schema);
-TIDE_KW(fn); TIDE_KW(network); TIDE_KW(options); TIDE_KW(validator); TIDE_KW(genesis);
-TIDE_KW(bootstrap); TIDE_KW(scenario); TIDE_KW(if); TIDE_KW(else); TIDE_KW(for); TIDE_KW(in);
-TIDE_KW(while); TIDE_KW(break); TIDE_KW(continue); TIDE_KW(return); TIDE_KW(true); TIDE_KW(false);
-TIDE_KW(null); TIDE_KW(transaction); TIDE_KW(instruction); TIDE_KW(invoke); TIDE_KW(deploy);
-TIDE_KW(airdrop); TIDE_KW(warp); TIDE_KW(snapshot); TIDE_KW(restore); TIDE_KW(assert); TIDE_KW(await);
-TIDE_KW(account); TIDE_KW(program); TIDE_KW(mint); TIDE_KW(token_account);
-TIDE_KW(associated_token_account); TIDE_KW(lookup_table); TIDE_KW(sysvar); TIDE_KW(feature);
-TIDE_KW(fork); TIDE_KW(clone); TIDE_KW(delete); TIDE_KW(extension);
-// Contextual: only keywords where the grammar expects them.
-TIDE_KW(using); TIDE_KW(from); TIDE_KW(with); TIDE_KW(at); TIDE_KW(slot); TIDE_KW(to); TIDE_KW(by);
-TIDE_KW(slots); TIDE_KW(epoch); TIDE_KW(time); TIDE_KW(amount); TIDE_KW(enabled); TIDE_KW(disabled);
-TIDE_KW(SOL); TIDE_KW(lamports); TIDE_KW(ms); TIDE_KW(s);
-#undef TIDE_KW
+// Single source of truth for keywords. Reserved words can never be
+// identifiers; contextual ones are keywords only where the grammar expects them.
+#define TIDE_RESERVED_KEYWORDS(X)                                                                         \
+    X(import) X(as) X(source) X(keypair) X(let) X(schema) X(fn) X(network) X(options) X(validator)        \
+    X(genesis) X(bootstrap) X(scenario) X(if) X(else) X(for) X(in) X(while) X(break) X(continue)          \
+    X(return) X(true) X(false) X(null) X(transaction) X(instruction) X(invoke) X(deploy) X(airdrop)       \
+    X(warp) X(snapshot) X(restore) X(assert) X(await) X(account) X(program) X(mint) X(token_account)      \
+    X(associated_token_account) X(lookup_table) X(sysvar) X(feature) X(fork) X(clone) X(delete)           \
+    X(extension)
+#define TIDE_CONTEXTUAL_KEYWORDS(X)                                                                       \
+    X(using) X(from) X(with) X(at) X(slot) X(to) X(by) X(slots) X(epoch) X(time) X(amount) X(enabled)     \
+    X(disabled) X(SOL) X(lamports) X(ms) X(s)
 
-constexpr std::array reserved_words = {
-    "import", "as", "source", "keypair", "let", "schema", "fn", "network", "options", "validator",
-    "genesis", "bootstrap", "scenario", "if", "else", "for", "in", "while", "break", "continue",
-    "return", "true", "false", "null", "transaction", "instruction", "invoke", "deploy", "airdrop",
-    "warp", "snapshot", "restore", "assert", "await", "account", "program", "mint", "token_account",
-    "associated_token_account", "lookup_table", "sysvar", "feature", "fork", "clone", "delete",
-    "extension"};
+#define TIDE_KW_DEFINE(name) constexpr auto kw_##name = LEXY_KEYWORD(#name, id);
+TIDE_RESERVED_KEYWORDS(TIDE_KW_DEFINE)
+TIDE_CONTEXTUAL_KEYWORDS(TIDE_KW_DEFINE)
+#undef TIDE_KW_DEFINE
 
-constexpr auto reserved_ident =
-    id.reserve(kw_import, kw_as, kw_source, kw_keypair, kw_let, kw_schema, kw_fn, kw_network, kw_options,
-               kw_validator, kw_genesis, kw_bootstrap, kw_scenario, kw_if, kw_else, kw_for, kw_in, kw_while,
-               kw_break, kw_continue, kw_return, kw_true, kw_false, kw_null, kw_transaction, kw_instruction,
-               kw_invoke, kw_deploy, kw_airdrop, kw_warp, kw_snapshot, kw_restore, kw_assert, kw_await,
-               kw_account, kw_program, kw_mint, kw_token_account, kw_associated_token_account,
-               kw_lookup_table, kw_sysvar, kw_feature, kw_fork, kw_clone, kw_delete, kw_extension);
+#define TIDE_KW_STRING(name) #name,
+constexpr std::array reserved_words = {TIDE_RESERVED_KEYWORDS(TIDE_KW_STRING)};
+#undef TIDE_KW_STRING
+
+#define TIDE_KW_SET_ELEMENT(name) / LEXY_LIT(#name)
+constexpr auto reserved_ident = id.reserve(dsl::literal_set() TIDE_RESERVED_KEYWORDS(TIDE_KW_SET_ELEMENT));
+#undef TIDE_KW_SET_ELEMENT
 
 // --------------------------------------------------------- error tags --
 

@@ -54,10 +54,13 @@ struct NetworkConfig {
     std::optional<std::uint64_t> slots_per_epoch, ticks_per_slot, compute_unit_limit, limit_ledger_size, warp_slot;
     std::optional<double> faucet_sol;
     std::optional<std::string> ledger, bind_address;
-    std::optional<std::int64_t> startup_timeout_ms, confirm_timeout_ms;
+    std::optional<std::int64_t> startup_timeout_ms, confirm_timeout_ms;  // unset: backend / default_confirm_timeout_ms
     std::vector<ValidatorConfig> validators;
-    std::map<std::string, Loc> option_origins;  // option key -> location, for diagnostics
 };
+
+// How long a transaction may take to confirm when `options { confirm_timeout }`
+// is not set. Used by the interpreter (`await`) and by backends alike.
+constexpr std::int64_t default_confirm_timeout_ms = 60'000;
 
 // ------------------------------------------------------------------ genesis --
 

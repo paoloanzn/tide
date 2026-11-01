@@ -1,4 +1,5 @@
-// Source management and positioned diagnostics shared by every pipeline stage.
+// Source management and positioned diagnostics shared by every pipeline stage,
+// plus a couple of tiny utilities every stage uses.
 //
 // A `Loc` is a raw pointer into a buffer owned by the `SourceManager`. This
 // keeps AST nodes small and lets any stage (parser, checker, interpreter,
@@ -14,6 +15,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace tide {
@@ -163,6 +165,29 @@ struct TideError : std::runtime_error {
     Loc loc;
     std::vector<std::pair<Loc, std::string>> notes;
     TideError(Loc l, const std::string& msg) : std::runtime_error(msg), loc(l) {}
+};
+
+// ------------------------------------------- small shared utilities --
+
+// Visitor built from lambdas for std::visit.
+template <class... Ts>
+struct overloaded : Ts... {
+    using Ts::operator()...;
+};
+
+// Sets `ref` to `value` for the guard's lifetime and restores the previous
+// value on scope exit, including when an exception propagates.
+template <class T>
+class Restore {
+public:
+    Restore(T& ref, T value) : ref_(ref), saved_(std::exchange(ref, std::move(value))) {}
+    ~Restore() { ref_ = std::move(saved_); }
+    Restore(const Restore&) = delete;
+    Restore& operator=(const Restore&) = delete;
+
+private:
+    T& ref_;
+    T saved_;
 };
 
 // Edit distance for "did you mean" suggestions.

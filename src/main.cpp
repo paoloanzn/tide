@@ -143,7 +143,8 @@ int main(int argc, char** argv) {
         return finish(2);
     }
 
-    std::filesystem::path state_root = args.state_dir.empty() ? path.parent_path() / ".tide" : std::filesystem::path(args.state_dir);
+    std::filesystem::path state_root =
+        args.state_dir.empty() ? tide::backend::default_state_root(path.parent_path()) : std::filesystem::path(args.state_dir);
     if (args.command == "down") {
         std::string error;
         if (!tide::backend::stop_network(state_root / network->name.name, std::cout, error)) {
