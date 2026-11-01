@@ -257,9 +257,6 @@ memo, in one transaction. Add it inside the network, after `genesis`:
 
 ```tide
   bootstrap {
-    // Wait for the first slot so builtin programs are available;
-    // v0.1.0 does not wait for this automatically.
-    await slot() >= 1;
     transaction as tx {
       signers = [alice];
       instruction token_program() {
@@ -282,9 +279,6 @@ memo, in one transaction. Add it inside the network, after `genesis`:
 - `as tx` binds the result. A bound transaction does not abort the block when
   it fails; you inspect `tx.success`, `tx.signature`, `tx.error`, `tx.logs`
   and `tx.slot` yourself. Here the `assert` turns a failure into an error.
-- `await slot() >= 1;` works around a v0.1.0 limitation: a transaction sent
-  as the very first runtime action can reach the validator before builtin
-  programs such as SPL Token are usable.
 
 ```text
 ==> configuring network 'token_net'
@@ -474,9 +468,6 @@ network token_net {
   }
 
   bootstrap {
-    // Wait for the first slot so builtin programs are available;
-    // v0.1.0 does not wait for this automatically.
-    await slot() >= 1;
     transaction as tx {
       signers = [alice];
       instruction token_program() {

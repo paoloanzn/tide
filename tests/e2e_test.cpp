@@ -4,7 +4,10 @@
 
 #include <cpr/cpr.h>
 
+#include <unistd.h>
+
 #include <cstdlib>
+#include <fstream>
 #include <sstream>
 
 #include "interp.hpp"
@@ -87,5 +90,36 @@ TEST_CASE("backend dry run: one --bind-address, validator setting wins", "[backe
     CHECK(cmd.find("127.0.0.2") == std::string::npos);
     CHECK(fs::exists(state / "n" / "manifest.json"));
     CHECK(fs::exists(state / "n" / "accounts"));
+    fs::remove_all(state);
+}
+
+TEST_CASE("backend dry run refuses a running network's state directory", "[backend]") {
+    SourceManager sm;
+    Diagnostics diags(sm);
+    const SourceFile* f = sm.add("running.tid", R"(
+        network n { genesis { account seed("a").pubkey { lamports = 1 SOL; } } }
+    )");
+    auto doc = parse_document(*f, diags);
+    REQUIRE(doc);
+    auto prog = sema::analyze(*doc, sm, diags);
+    REQUIRE(prog);
+    fs::path state = fs::temp_directory_path() / "tide_dry_run_running_test";
+    fs::remove_all(state);
+    fs::create_directories(state / "n");
+    // Any live process stands in for the running validator.
+    std::ofstream(state / "n" / "validator.pid") << ::getpid();
+    std::ostringstream log;
+    Interpreter interp(*prog, diags, log);
+    REQUIRE(interp.init_globals());
+    backend::SolanaBackendOptions opts;
+    opts.state_root = state;
+    opts.dry_run = true;
+    backend::SolanaTestValidatorBackend be(opts, diags, log);
+    RunOptions ro;
+    ro.dry_run = true;
+    CHECK_FALSE(interp.run(*prog->networks().front(), be, ro).ok);
+    CHECK(diags.error_count() == 1);
+    CHECK_FALSE(fs::exists(state / "n" / "manifest.json"));
+    CHECK_FALSE(fs::exists(state / "n" / "accounts"));
     fs::remove_all(state);
 }

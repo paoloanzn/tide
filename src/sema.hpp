@@ -2,7 +2,7 @@
 // and declaration validation. Runs to completion before anything executes;
 // the interpreter relies on the decorations it leaves on the AST.
 //
-// The full language semantics are documented in README.md.
+// The language semantics are documented in docs/language/.
 #pragma once
 
 #include <array>

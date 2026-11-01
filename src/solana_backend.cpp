@@ -12,8 +12,10 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
+#include <ctime>
 #include <fstream>
 #include <map>
 #include <ostream>
@@ -137,6 +139,46 @@ void stop_process(pid_t pid, int sig, std::chrono::milliseconds timeout) {
     }
     ::kill(pid, SIGKILL);
     ::waitpid(pid, nullptr, 0);
+}
+
+// The validator an interrupted `tide up` must not leave behind: the bootstrap
+// instance, or the network instance until launch() hands it off with a pid
+// file. Only one runs at a time. Read by the signal handler, hence a
+// lock-free atomic.
+std::atomic<pid_t> owned_validator{-1};
+static_assert(std::atomic<pid_t>::is_always_lock_free);
+
+// SIGINT/SIGTERM/SIGHUP: validators run in their own session and never see the
+// terminal's Ctrl-C, so stop the owned one here, then die from the signal.
+// Async-signal-safe calls only.
+extern "C" void stop_owned_validator_and_reraise(int sig) {
+    if (pid_t pid = owned_validator.exchange(-1); pid > 0) {
+        constexpr char msg[] = "\ntide: interrupted, stopping solana-test-validator\n";
+        [[maybe_unused]] auto n = ::write(STDERR_FILENO, msg, sizeof msg - 1);
+        ::kill(pid, SIGTERM);
+        bool reaped = false;
+        const timespec step{0, std::chrono::nanoseconds(process_poll_interval).count()};
+        for (auto waited = std::chrono::milliseconds(0); !reaped && waited < abort_stop_timeout; waited += process_poll_interval) {
+            reaped = ::waitpid(pid, nullptr, WNOHANG) == pid;
+            if (!reaped) ::nanosleep(&step, nullptr);
+        }
+        if (!reaped) {
+            ::kill(pid, SIGKILL);
+            ::waitpid(pid, nullptr, 0);
+        }
+    }
+    ::signal(sig, SIG_DFL);
+    ::raise(sig);
+}
+
+void install_interrupt_handlers() {
+    static bool installed = false;
+    if (installed) return;
+    struct sigaction sa {};
+    sa.sa_handler = stop_owned_validator_and_reraise;
+    sigemptyset(&sa.sa_mask);
+    for (int sig : {SIGINT, SIGTERM, SIGHUP}) ::sigaction(sig, &sa, nullptr);
+    installed = true;
 }
 
 std::string run_capture(const std::vector<std::string>& argv, int& exit_code) {
@@ -547,13 +589,15 @@ struct SolanaTestValidatorBackend::Impl {
             if (v.rpc_port) rpc_port = *v.rpc_port;
         }
         if (auto bind = effective_bind_address(); bind && *bind != "0.0.0.0") bind_host = *bind;
+        // Before the dry-run exit too: a dry run rewrites accounts/ and
+        // manifest.json, which a running network still uses.
+        if (auto pid = read_pid(); pid && process_alive(*pid))
+            fail(cfg.origin, "network '" + cfg.name + "' is already running (pid " + std::to_string(*pid) +
+                                 "); stop it first with 'tide down'");
         if (opts.dry_run) return;
 
         if (!find_in_path(opts.validator_binary))
             fail(cfg.origin, "'" + opts.validator_binary + "' was not found in PATH; install the Agave tools or pass --validator");
-        if (auto pid = read_pid(); pid && process_alive(*pid))
-            fail(cfg.origin, "network '" + cfg.name + "' is already running (pid " + std::to_string(*pid) +
-                                 "); stop it first with 'tide down'");
         auto check_port = [&](std::optional<std::uint16_t> p, std::uint16_t dflt, const char* what) {
             std::uint16_t port = p.value_or(dflt);
             if (port_in_use(port)) {
@@ -646,25 +690,37 @@ struct SolanaTestValidatorBackend::Impl {
         fs::create_directories(state_dir);
         { std::ofstream(log_file, std::ios::app) << "\n=== tide: starting " << role << " instance ===\n" << shell_join(args) << "\n"; }
         log << "    starting solana-test-validator (" << role << ", rpc " << rpc_url() << ")\n";
+        install_interrupt_handlers();
         pid_t pid = spawn_process(args, log_file);
-        wait_until_healthy(pid, role);
+        owned_validator = pid;
+        wait_until_ready(pid, role);
         return pid;
     }
 
-    void wait_until_healthy(pid_t pid, const char* role) {
+    // Healthy is not enough: at slot 0 the builtin programs are not yet
+    // usable and a first transaction fails with "Program is not deployed".
+    void wait_until_ready(pid_t pid, const char* role) {
         JsonRpc probe(rpc_url());
         auto timeout = startup_timeout();
         auto deadline = std::chrono::steady_clock::now() + timeout;
         while (std::chrono::steady_clock::now() < deadline) {
             int status = 0;
-            if (::waitpid(pid, &status, WNOHANG) == pid)
+            if (::waitpid(pid, &status, WNOHANG) == pid) {
+                owned_validator = -1;
                 fail(cfg.origin, std::string("solana-test-validator (") + role + ") exited during startup; last log lines:\n" +
                                      tail_lines(log_file, 15));
-            if (probe.healthy()) return;
+            }
+            if (probe.healthy()) {
+                try {
+                    if (probe.slot("confirmed") >= 1) return;
+                } catch (const std::exception&) {  // still starting; retry
+                }
+            }
             std::this_thread::sleep_for(health_poll_interval);
         }
+        owned_validator = -1;
         stop_process(pid, SIGTERM, abort_stop_timeout);
-        fail(cfg.origin, std::string("solana-test-validator (") + role + ") did not become healthy within " +
+        fail(cfg.origin, std::string("solana-test-validator (") + role + ") did not become ready within " +
                              std::to_string(timeout.count()) + "ms; see " + log_file.string());
     }
 
@@ -691,6 +747,7 @@ struct SolanaTestValidatorBackend::Impl {
             persisted_slot = target;
             log << "    stopping bootstrap instance\n";
             stop_process(bootstrap_pid, SIGINT, graceful_stop_timeout);
+            owned_validator = -1;
             bootstrap_pid = -1;
         } else {
             write_genesis_files();
@@ -722,6 +779,7 @@ struct SolanaTestValidatorBackend::Impl {
             wait_for_slot(c.rpc(), "confirmed", *persisted_slot, startup_timeout(),
                           "the relaunched validator did not replay the persisted ledger");
         }
+        owned_validator = -1;  // running and recorded in validator.pid: `tide down` owns it now
         return c;
     }
 
@@ -743,6 +801,7 @@ struct SolanaTestValidatorBackend::Impl {
 
     void abort() noexcept {
         try {
+            owned_validator = -1;
             if (bootstrap_pid > 0) stop_process(bootstrap_pid, SIGTERM, abort_stop_timeout);
             bootstrap_pid = -1;
             if (network_pid > 0 && !detached) {

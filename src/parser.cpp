@@ -1,4 +1,4 @@
-// Tide grammar (see lang-design.md) expressed as lexy productions.
+// Tide grammar (see docs/language/) expressed as lexy productions.
 //
 // Deliberate leniencies, all re-checked with better diagnostics in sema:
 //  * Statement bodies share one statement grammar; which statements are legal

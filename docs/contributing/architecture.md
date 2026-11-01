@@ -198,9 +198,9 @@ Why the boundary exists:
 `src/solana_backend.cpp` implements `SolanaTestValidatorBackend`:
 
 - **`Genesis`** (a `GenesisBuilder`) collects accounts and programs in memory. It refuses to overwrite builtin program accounts and reports a second write to the same address with a note pointing at the first. On `persist()` the state is written under `<state_root>/<network>/` as account JSON files plus program flags.
-- **`JsonRpc`** is a JSON-RPC 2.0 transport (over `cpr`) to one endpoint, with a short-timeout `getHealth` probe used while a validator starts.
+- **`JsonRpc`** is a JSON-RPC 2.0 transport (over `cpr`) to one endpoint, with a short-timeout `getHealth` probe used, together with `getSlot`, to wait until a starting validator is past slot 0.
 - **`RpcRuntime`** (a `RuntimeClient`) sends transactions, airdrops and state queries over `JsonRpc`, and deploys programs through the `solana` CLI.
-- **Process management**: bootstrap runs on a private validator instance started on the persisted state; `persist()` stops it after finalizing; `launch()` starts the long-running validator in a new session so it survives Tide; `stop_network()` (used by `tide down`) stops it later. Stops escalate to `SIGKILL` after a grace period.
+- **Process management**: bootstrap runs on a private validator instance started on the persisted state; `persist()` stops it after finalizing; `launch()` starts the long-running validator in a new session so it survives Tide; `stop_network()` (used by `tide down`) stops it later. Stops escalate to `SIGKILL` after a grace period. Until `launch()` returns, the running instance is recorded in an atomic that a SIGINT/SIGTERM/SIGHUP handler reads, so an interrupted `tide up` stops it instead of leaving an orphan with no pid file.
 
 `SolanaBackendOptions::dry_run` writes state and prints the launch command without starting processes. Behaviour and limitations from a user's point of view are in [the solana-test-validator page](../backends/solana-test-validator.md).
 

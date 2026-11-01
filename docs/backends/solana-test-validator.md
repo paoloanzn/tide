@@ -166,18 +166,18 @@ account files.
 | `slot()` | `getSlot` (commitment `confirmed`) | |
 | `epoch()` | `getEpochInfo` (commitment `confirmed`) | |
 
-Known issue in v0.1.0: the validator answers health checks while still at
-slot 0, and Tide does not wait for slot 1. The first transaction of bootstrap
-(or of the first scenario, when there is no bootstrap) can fail with
-"Program is not deployed". Start the block with `await slot() >= 1;`. See
-[runtime](../language/runtime.md).
+A freshly started validator answers health checks while still at slot 0,
+when builtin programs are not yet usable (a transaction then fails with
+"Program is not deployed"). Tide therefore treats a validator as ready only
+when it is healthy and its `confirmed` slot is at least 1; see the startup row
+below.
 
 ## Timeouts and polling
 
 | What | Value | Configurable |
 |------|-------|--------------|
-| Validator startup (health) | 120 s | `options { startup_timeout }` |
-| Health probe | `getHealth` every 500 ms, 2 s request timeout | no |
+| Validator startup (healthy and `confirmed` slot ≥ 1) | 120 s | `options { startup_timeout }` |
+| Readiness probe | `getHealth` (2 s request timeout), then `getSlot` (`confirmed`), every 500 ms | no |
 | Replay after relaunch (`confirmed` slot reaches the persisted slot) | same as startup timeout, polled every 400 ms | `options { startup_timeout }` |
 | Bootstrap finalization before shutdown | 90 s, `getSlot` (`finalized`) every 400 ms | no |
 | Transaction confirmation | 60 s, polled every 300 ms | `options { confirm_timeout }` |
@@ -185,9 +185,10 @@ slot 0, and Tide does not wait for slot 1. The first transaction of bootstrap
 | Stopping the bootstrap instance | SIGINT, 30 s grace, then SIGKILL | no |
 | `tide down` | SIGINT, 20 s grace, then SIGKILL | no |
 | Teardown after an error | SIGTERM, 10 s grace, then SIGKILL | no |
+| Teardown after SIGINT, SIGTERM or SIGHUP to `tide` (before the network is ready) | SIGTERM, 10 s grace, then SIGKILL | no |
 
 If the validator exits during startup, the error includes the last 15 lines
-of `validator.log`. If it does not become healthy in time, Tide stops it and
+of `validator.log`. If it does not become ready in time, Tide stops it and
 names the log file.
 
 ## Port checks

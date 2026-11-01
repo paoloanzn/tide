@@ -143,6 +143,16 @@ int main(int argc, char** argv) {
         return finish(2);
     }
 
+    for (const auto& wanted : args.scenarios) {
+        bool found = false;
+        for (const auto& e : network->entries)
+            if (const auto* sc = std::get_if<tide::ast::ScenarioEntry>(&e.node); sc && sc->name.name == wanted) found = true;
+        if (!found) {
+            std::cerr << "tide: no scenario named '" << wanted << "' in network '" << network->name.name << "'\n";
+            return finish(2);
+        }
+    }
+
     std::filesystem::path state_root =
         args.state_dir.empty() ? tide::backend::default_state_root(path.parent_path()) : std::filesystem::path(args.state_dir);
     if (args.command == "down") {

@@ -67,12 +67,14 @@ configuration and handed to the backend (see
    validator `identity`.
 2. Computes the state directory, `<state dir>/<network>/`, where `<state dir>`
    is `--state-dir` or `.tide` next to the script.
-3. Unless `--dry-run` is given, runs preflight checks:
-   - the validator binary (`solana-test-validator` or `--validator`) must be
-     found;
+3. Runs preflight checks:
    - the network must not already be running (see
-     [re-running `tide up`](#re-running-tide-up));
-   - the RPC port (default 8899) and faucet port (default 9900) must be free.
+     [re-running `tide up`](#re-running-tide-up)), also checked by
+     `--dry-run`;
+   - unless `--dry-run` is given, the validator binary
+     (`solana-test-validator` or `--validator`) must be found;
+   - unless `--dry-run` is given, the RPC port (default 8899) and faucet port
+     (default 9900) must be free.
 
 A preflight failure exits with code 1 and nothing has been started.
 
@@ -106,8 +108,8 @@ If the network has a `bootstrap` block:
 
 1. The genesis plan is written to `accounts/` (see [state layout](#state-directory-layout)).
 2. A **private** validator instance is started with `--reset` and every genesis
-   flag, creating a fresh ledger in `ledger/`. Tide polls `getHealth` until the
-   validator answers (see [timeouts](../backends/solana-test-validator.md#timeouts-and-polling)).
+   flag, creating a fresh ledger in `ledger/`. Tide polls until the validator
+   is healthy and past slot 0 (see [timeouts](../backends/solana-test-validator.md#timeouts-and-polling)).
 3. The bootstrap block runs against it: `transaction`, `invoke`, `deploy`,
    `airdrop`, `await` and `assert` (see [runtime](../language/runtime.md)).
 
@@ -116,10 +118,9 @@ always stopped before `tide up` continues. It uses the same ports as the final
 network, and Tide never reports it as running. This guarantees that scenarios
 and external clients only ever see a network whose bootstrap has completed.
 
-Known issue in v0.1.0: the first transaction of bootstrap can fail with
-"Program is not deployed" because the validator is still at slot 0 when it
-starts answering health checks. Start the block with `await slot() >= 1;`.
-See [runtime](../language/runtime.md).
+Before the block runs, Tide waits until the instance is healthy and its
+`confirmed` slot is at least 1, so the first statement can already be a
+transaction to a builtin program.
 
 If there is no `bootstrap` block, no validator is started in this phase.
 
@@ -224,8 +225,8 @@ independent background process rather than a child that dies with Tide.
      effect when a ledger is created, so passing them again would be wrong.
    - Without a bootstrap, it is started with `--reset` and every genesis flag,
      creating the ledger now.
-2. Tide polls `getHealth` until it answers `ok`, within `startup_timeout`
-   (default 120 s). If the process exits during startup, the error includes
+2. Tide polls `getHealth` until it answers `ok` and the `confirmed` slot is at
+   least 1, within `startup_timeout` (default 120 s). If the process exits during startup, the error includes
    the last 15 lines of `validator.log`.
 3. The pid is written to `validator.pid`.
 4. After a bootstrap, Tide also waits until the `confirmed` slot reaches the
@@ -245,8 +246,9 @@ reports a problem but leaves the network usable for investigation.
 Scenarios run in declaration order against the launched network.
 
 - `--no-scenarios` skips all of them.
-- `--scenario <name>` (repeatable) runs only the named ones. Names that match
-  no scenario are ignored without a message.
+- `--scenario <name>` (repeatable) runs only the named ones. A name that
+  matches no scenario of the selected network is a usage error (exit code 2),
+  reported before anything starts.
 - An error inside a scenario (a failed `assert`, a runtime error) is reported
   as `scenario '<name>' failed: ...`, the scenario is marked `FAILED`, and the
   next scenario runs. The network is not stopped.
@@ -302,7 +304,7 @@ waits up to 10 seconds before SIGKILL.
 | Genesis | unsupported sysvar field, clone fetch failed | nothing | nothing new |
 | Bootstrap start or body | validator exits on startup, failed `assert` | nothing (bootstrap instance stopped) | `accounts/`, a partial `ledger/`, `validator.log`; no `manifest.json` |
 | Persist | bootstrap did not finalize within 90 s | nothing (bootstrap instance stopped) | as above |
-| Launch | not healthy within `startup_timeout`, replay did not reach the persisted slot | nothing (network stopped, `validator.pid` removed) | `accounts/`, `ledger/`, `manifest.json`, `validator.log` |
+| Launch | not ready within `startup_timeout`, replay did not reach the persisted slot | nothing (network stopped, `validator.pid` removed) | `accounts/`, `ledger/`, `manifest.json`, `validator.log` |
 | Scenario | failed `assert` | the network (exit code 3) | full state, `validator.pid` |
 
 A bootstrap failure looks like this; the bootstrap instance has already been
@@ -334,12 +336,21 @@ net.tid:9:5: error: assertion failed: alice should hold 5 SOL
 1 error(s), 0 warning(s)
 ```
 
-Tide installs no signal handlers. If the `tide` process itself is interrupted
-(for example with Ctrl-C), teardown does not run, and because validators run
-in their own session they do not receive the terminal's signal. An instance
-started before the interruption keeps running. If it was the final network,
-`validator.pid` exists and `tide down` stops it; if it was the bootstrap
-instance, no pid file exists and the process must be stopped by hand.
+### Interrupting `tide up`
+
+Validators run in their own session, so the terminal's Ctrl-C reaches only the
+`tide` process. Tide handles SIGINT, SIGTERM and SIGHUP itself:
+
+- During bootstrap, persist, or launch up to the point where the network is
+  ready, it prints `tide: interrupted, stopping solana-test-validator`, stops
+  the validator it started (SIGTERM, 10 s grace, then SIGKILL) and exits from
+  the signal (exit code 130 for Ctrl-C in most shells). Nothing is left
+  running.
+- Once the network is launched (during scenarios), the network is already
+  recorded in `validator.pid`, so Tide exits and leaves it running, as after a
+  failed scenario. `tide down` stops it.
+
+Files on disk are left as they were at the moment of the interruption.
 
 ## `tide down`
 
@@ -403,8 +414,10 @@ starting one (for example on a machine without the Agave tools, or in CI).
 With `--dry-run`, `tide up` runs phases 1 to 5, then a reduced persist, and
 stops:
 
-- Configuration preflight checks are skipped: the validator binary need not
-  exist, and running networks and busy ports are not checked.
+- Most configuration preflight checks are skipped: the validator binary need
+  not exist and busy ports are not checked. A network that is already running
+  from the same state directory is still an error, because the dry run would
+  rewrite its `accounts/` and `manifest.json`.
 - Genesis runs fully, including `clone` (which fetches from the source
   cluster) and all genesis diagnostics.
 - `accounts/` and `manifest.json` are written. The manifest has
@@ -428,11 +441,8 @@ tide up net.tid --dry-run
 ==> dry run: state persisted; bootstrap, launch and scenarios skipped
 ```
 
-Because the running-network check is skipped, a dry run against the state
-directory of a running network rewrites its `accounts/` and `manifest.json`.
-The running validator is not affected (it read the account files when its
-ledger was created), but the manifest no longer describes it. Use a separate
-`--state-dir` for dry runs.
+To dry-run a script whose network is running, stop it first or pass a
+separate `--state-dir`.
 
 See also: [CLI reference](../reference/cli.md),
 [solana-test-validator backend](../backends/solana-test-validator.md),

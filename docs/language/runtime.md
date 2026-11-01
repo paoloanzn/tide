@@ -49,7 +49,8 @@ it is up. Scenarios are for testing the network you built, not for building it.
 - At the end, Tide prints `scenarios: N passed, M failed` and exits with code
   3 if any scenario failed (the network keeps running).
 - `tide up --scenario <name>` (repeatable) runs only the named scenarios, and
-  `--no-scenarios` skips them. See the [CLI reference](../reference/cli.md).
+  `--no-scenarios` skips them. A name that matches no scenario of the network
+  is a usage error (exit code 2), reported before anything starts. See the [CLI reference](../reference/cli.md).
 
 ### How they differ
 
@@ -276,24 +277,11 @@ see [network options](networks.md)). A transaction that is not confirmed in
 time counts as failed, with the error
 `transaction was not confirmed within <n>ms`.
 
-### Known issue (v0.1.0): first transaction at slot 0
-
-**Symptom.** A transaction sent as the very first runtime action (the first
-statement of `bootstrap`, or the first statement of a scenario when the network
-has no `bootstrap`) fails with an error such as `Program is not deployed` or
-`Unsupported program id`, even for builtin programs like SPL Token.
-
-**Cause.** The validator is still at slot 0 when Tide reports it as healthy,
-and builtin programs are not usable until the first slot has passed.
-
-**Workaround.** Wait for slot 1 before the first transaction:
-
-```tide
-bootstrap {
-  await slot() >= 1;
-  // transactions from here on
-}
-```
+A transaction can be the very first statement of `bootstrap` or of a
+scenario. Builtin programs such as SPL Token are not usable while a fresh
+validator is still at slot 0, so Tide only hands a validator to runtime code
+once its `confirmed` slot is at least 1 (see
+[the backend page](../backends/solana-test-validator.md#timeouts-and-polling)).
 
 ## `invoke`
 
@@ -468,7 +456,7 @@ await <bool expression>;
 ```
 
 ```tide
-await slot() >= 1;
+await slot() >= 50;
 await exists(counter_v2.pubkey);
 ```
 

@@ -210,7 +210,7 @@ network configured {
 | `faucet_sol` | number (`int` or `float`) | validator default | SOL held by the built-in faucet that serves `airdrop`. |
 | `ledger` | `string` | `<state dir>/<network>/ledger` | Ledger directory. Relative paths resolve against the script's directory. |
 | `bind_address` | `string` | validator default | IP address the validator binds to. A `validator { bind_address }` overrides it. Tide reaches the RPC endpoint at this address (at `127.0.0.1` when unset or `0.0.0.0`). |
-| `startup_timeout` | `duration` | `120 s` | How long Tide waits for a validator to become healthy or to replay the persisted ledger. |
+| `startup_timeout` | `duration` | `120 s` | How long Tide waits for a validator to become ready (healthy and past slot 0) or to replay the persisted ledger. |
 | `confirm_timeout` | `duration` | `60 s` | How long a transaction may take to confirm, and how long `await` polls before failing. |
 
 Unknown keys are errors, with a suggestion when a known key is close.

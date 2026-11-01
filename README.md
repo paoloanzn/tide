@@ -135,7 +135,6 @@ network quickstart {
 
   // Runs once on a private validator; its effects become part of the saved state.
   bootstrap {
-    await slot() >= 1;  // v0.1.0: wait until builtin programs are usable
     transaction as tx {
       signers = [alice];  // Alice signs and, as the first signer, pays the fee
       instruction token_program() {
@@ -162,9 +161,7 @@ The script uses each kind of block once:
   transactions are involved; the accounts exist when the network starts.
 - **`bootstrap`** sends a real SPL Token transfer. `transaction as tx` binds the
   result to `tx`, so a failure does not abort the block on its own; the next
-  line checks `tx.success`. The `await` line works around a v0.1.0 limitation:
-  the first transaction can fail if it is sent while the validator is still at
-  slot 0.
+  line checks `tx.success`.
 - **`scenario balances`** runs after launch and checks the balances on the
   live network.
 

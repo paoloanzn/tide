@@ -90,7 +90,7 @@ is an unknown option (exit code 2).
 | Option | Commands | Default | Description |
 |--------|----------|---------|-------------|
 | `--network <name>` | `up`, `down` | the only network | Network to use when the file declares several. See [network selection](#network-selection). |
-| `--scenario <name>` | `up` | all scenarios | Run only this scenario. Repeatable. Names that match no scenario are ignored. |
+| `--scenario <name>` | `up` | all scenarios | Run only this scenario. Repeatable. A name that matches no scenario of the selected network is a usage error (exit code 2). |
 | `--no-scenarios` | `up` | off | Skip all scenarios. Takes precedence over `--scenario`. |
 | `--dry-run` | `up` | off | Build and persist genesis state, print the validator command line, start nothing. See [`--dry-run`](../guides/lifecycle.md#--dry-run). |
 | `--state-dir <dir>` | `up`, `down` | `<script dir>/.tide` | Root directory for network state. Each network uses `<dir>/<network>/`. A relative path is relative to the current directory. |
@@ -132,8 +132,9 @@ given on the command line can be selected, not networks in imported modules.
 |------|---------|
 | 0 | Success. `check` found no errors; `up` reached the end of the lifecycle (or the dry run persisted) and every scenario that ran passed; `down` stopped the network or found its process already gone; `--help`/`--version`. Warnings do not change the code. |
 | 1 | An error in the script or during execution: the file cannot be read, parse or check errors, an evaluation error, a backend error (such as a busy port or a validator that fails to start), a failed `assert` in genesis or bootstrap. For `down`: no `validator.pid` was found, or it is corrupt. |
-| 2 | Usage error: missing command or file, unknown command, unknown option, option missing its value, or a network selection error. Usage errors that come from argument parsing also print the usage text. |
+| 2 | Usage error: missing command or file, unknown command, unknown option, option missing its value, a network selection error, or a `--scenario` name that matches no scenario. Usage errors that come from argument parsing also print the usage text. |
 | 3 | `up` only: the network was launched, but at least one scenario failed. The network is still running. |
+| 128 + n | `tide` was stopped by signal n (130 for Ctrl-C, as reported by most shells). Before the network is ready, Tide first stops the validator it started; see [interrupting `tide up`](../guides/lifecycle.md#interrupting-tide-up). |
 
 ## Output streams
 
