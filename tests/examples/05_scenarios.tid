@@ -1,0 +1,9 @@
+keypair payer = seed("payer");
+network scenarios {
+  bootstrap { airdrop payer.pubkey amount 5 SOL; snapshot "ready"; }
+  scenario replay {
+    warp by slots 100;
+    assert balance(payer.pubkey) >= 5 SOL;
+    restore "ready";
+  }
+}

@@ -1,0 +1,17 @@
+keypair issuer = seed("issuer");
+keypair holder = seed("holder");
+keypair asset = seed("asset");
+network tokens {
+  genesis {
+    mint asset.pubkey {
+      token_program = token_program(); decimals = 6;
+      mint_authority = issuer.pubkey; freeze_authority = null;
+      supply = 125000000; lamports = rent_exempt(82);
+    }
+    associated_token_account ata(holder.pubkey, asset.pubkey) {
+      token_program = token_program(); mint = asset.pubkey;
+      owner = holder.pubkey; amount = 125000000;
+      lamports = rent_exempt(165);
+    }
+  }
+}

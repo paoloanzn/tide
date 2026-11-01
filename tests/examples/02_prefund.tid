@@ -1,0 +1,9 @@
+keypair alice = seed("alice");
+network funded {
+  genesis {
+    account alice.pubkey {
+      lamports = 100 SOL; owner = system_program();
+      data = hex(""); executable = false; rent_epoch = 0;
+    }
+  }
+}

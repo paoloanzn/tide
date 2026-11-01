@@ -1,0 +1,10 @@
+source upstream = rpc("https://api.mainnet-beta.solana.com");
+network forked {
+  genesis {
+    fork from upstream at slot 300000000;
+    clone account pubkey("REPLACE_WITH_BASE58_ADDRESS")
+      from upstream at slot 300000000 {
+        lamports = 20 SOL;
+      };
+  }
+}

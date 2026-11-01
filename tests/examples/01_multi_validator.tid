@@ -1,0 +1,5 @@
+network cluster {
+  options { slots_per_epoch = 64; ticks_per_slot = 64; }
+  validator primary { rpc_port = 8899; gossip_port = 8001; }
+  validator secondary { rpc_port = 8898; gossip_port = 8002; }
+}

@@ -1,0 +1,68 @@
+keypair admin = seed("admin");
+keypair alice = seed("alice");
+keypair bob = seed("bob");
+keypair usd = seed("usd");
+keypair counter = seed("counter");
+let state = pda(counter.pubkey, ["state"]);
+
+network local_defi {
+  options { slots_per_epoch = 128; ticks_per_slot = 64; }
+  validator primary { rpc_port = 8899; gossip_port = 8001; }
+
+  genesis {
+    account admin.pubkey {
+      lamports = 50 SOL; owner = system_program();
+      data = hex(""); executable = false; rent_epoch = 0;
+    }
+    account alice.pubkey { lamports = 10 SOL; owner = system_program(); data = hex(""); executable = false; rent_epoch = 0; }
+    account bob.pubkey { lamports = 2 SOL; owner = system_program(); data = hex(""); executable = false; rent_epoch = 0; }
+
+    program counter {
+      id = counter.pubkey; binary = "./target/deploy/counter.so";
+      loader = bpf_upgradeable_loader();
+      upgrade_authority = admin.pubkey;
+      idl = "./target/idl/counter.json";
+    }
+    account state {
+      lamports = rent_exempt(16); owner = counter.pubkey;
+      data = anchor("Counter", { value: 0 });
+      executable = false; rent_epoch = 0;
+    }
+    mint usd.pubkey {
+      token_program = token_program(); decimals = 6;
+      mint_authority = admin.pubkey; freeze_authority = null;
+      supply = 1000000000; lamports = rent_exempt(82);
+    }
+    associated_token_account ata(alice.pubkey, usd.pubkey) {
+      token_program = token_program(); mint = usd.pubkey;
+      owner = alice.pubkey; amount = 1000000000;
+      lamports = rent_exempt(165);
+    }
+    associated_token_account ata(bob.pubkey, usd.pubkey) {
+      token_program = token_program(); mint = usd.pubkey;
+      owner = bob.pubkey; amount = 0;
+      lamports = rent_exempt(165);
+    }
+  }
+
+  bootstrap {
+    invoke counter.pubkey with {
+      method = "increment";
+      accounts = { state: state, authority: admin.pubkey };
+      args = { by: 2 }; signers = [admin];
+    };
+    snapshot "baseline";
+  }
+
+  scenario transfer {
+    transaction as tx {
+      fee_payer = alice.pubkey; signers = [alice];
+      instruction token_program() {
+        accounts = [ata(alice.pubkey, usd.pubkey), ata(bob.pubkey, usd.pubkey), alice.pubkey];
+        data = spl_transfer(25000000);
+      }
+    }
+    assert tx.success;
+    assert token_balance(ata(bob.pubkey, usd.pubkey)) == 25000000;
+  }
+}

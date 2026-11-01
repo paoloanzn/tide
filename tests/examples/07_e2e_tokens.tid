@@ -1,0 +1,86 @@
+// End-to-end script exercised against a real solana-test-validator.
+// Uses non-default ports so it does not collide with a developer's validator.
+keypair alice = seed("alice");
+keypair bob = seed("bob");
+keypair usd = seed("usd");
+let alice_usd = ata(alice.pubkey, usd.pubkey);
+let bob_usd = ata(bob.pubkey, usd.pubkey);
+
+schema Note using borsh {
+  author: pubkey;
+  amount: u64;
+  tags: [string];
+  memo: Option<string>;
+}
+
+fn sol_amount(n: int) -> int {
+  return n * 1 SOL;
+}
+
+network e2e {
+  options { slots_per_epoch = 64; confirm_timeout = 30 s; }
+  validator primary {
+    rpc_port = 18899;
+    faucet_port = 19900;
+    gossip_port = 18001;
+    dynamic_port_range = "18002-18040";
+  }
+
+  let note_address = pda(system_program(), ["note", alice.pubkey]);
+
+  genesis {
+    account alice.pubkey { lamports = 10 SOL; }
+    account bob.pubkey { lamports = sol_amount(2); owner = system_program(); }
+    account note_address {
+      lamports = rent_exempt(128);
+      owner = system_program();
+      data = borsh(Note, { author: alice.pubkey, amount: 42, tags: ["a", "b"] });
+    }
+    mint usd.pubkey { decimals = 6; mint_authority = alice.pubkey; supply = 1000000; }
+    associated_token_account alice_usd { mint = usd.pubkey; owner = alice.pubkey; amount = 1000000; }
+    associated_token_account bob_usd { mint = usd.pubkey; owner = bob.pubkey; amount = 0; }
+
+    for i in 0..3 {
+      account seed("filler-" + str(i)).pubkey { lamports = 1 SOL; }
+    }
+    assert balance(alice.pubkey) == 10 SOL;
+    assert token_balance(alice_usd) == 1000000;
+  }
+
+  bootstrap {
+    airdrop bob.pubkey amount 1 SOL;
+    // The ATA program re-derives the address on chain: this fails if Tide's
+    // PDA / curve logic disagrees with Solana's.
+    transaction {
+      signers = [alice];
+      instruction associated_token_program() {
+        accounts = [signer(alice.pubkey), alice_usd, readonly(alice.pubkey), readonly(usd.pubkey),
+                    readonly(system_program()), readonly(token_program())];
+        data = u8(1);
+      }
+    }
+    transaction as tx {
+      signers = [alice];
+      instruction token_program() { accounts = [alice_usd, bob_usd, alice.pubkey]; data = spl_transfer(250000); }
+      instruction memo_program() { accounts = []; data = memo("tide bootstrap"); }
+    }
+    assert tx.success, "transfer failed";
+  }
+
+  scenario balances {
+    assert token_balance(bob_usd) == 250000;
+    assert token_balance(alice_usd) == 750000;
+    assert balance(bob.pubkey) == 3 SOL;
+    let note = decode(Note, account_info(note_address).data);
+    assert note.amount == 42 && note.tags[1] == "b" && note.memo == null;
+  }
+
+  scenario rejected_transfer {
+    transaction as bad {
+      signers = [bob];
+      instruction token_program() { accounts = [alice_usd, bob_usd, bob.pubkey]; data = spl_transfer(1); }
+    }
+    assert !bad.success, "bob must not be able to move alice's tokens";
+    await slot() > 5;
+  }
+}

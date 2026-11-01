@@ -1,0 +1,14 @@
+# CMake build trees (also holds vcpkg_installed/)
+/build/
+CMakeUserPresets.json
+
+# Network state written by `tide up` next to each script
+.tide/
+
+# Editor / OS clutter
+.vscode/
+.idea/
+*.swp
+.DS_Store
+.cache/
+compile_commands.json
