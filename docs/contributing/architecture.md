@@ -10,9 +10,9 @@ This page is for people who want to build Tide from source, find their way aroun
 | --- | --- |
 | CMake >= 3.25 | `cmake_minimum_required(VERSION 3.25)`; the presets file uses schema version 6. |
 | Ninja | Both presets use the `Ninja` generator. |
-| C++20 compiler | `CMAKE_CXX_STANDARD 20`, extensions off. Tide's `int` is a 128-bit integer (`tide::i128`, an alias of the `__int128` extension), so GCC or Clang is required (GCC 13 is known to work). |
+| C++20 compiler | `CMAKE_CXX_STANDARD 20`, extensions off. Tide's `int` is a 128-bit integer (`tide::i128`, an alias of the `__int128` extension), so GCC or Clang is required. GCC 12 and 13 and Apple Clang (Xcode 16) are built in CI. |
 | vcpkg | Dependencies come from `vcpkg.json` in manifest mode. `VCPKG_ROOT` must point at your vcpkg checkout; the presets load `$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake`. |
-| POSIX system | The test-validator backend uses `posix_spawn`, signals and sockets. Development happens on Linux. |
+| POSIX system | The test-validator backend uses `posix_spawn`, signals and sockets. Linux and macOS are built and tested in CI. |
 | clang-format, clang-tidy, clangd 18 | Optional for building; required for the `lint` preset and for keeping changes formatted and lint-clean (see [code style and linting](#code-style-and-linting)). |
 
 Dependencies declared in `vcpkg.json`:
@@ -126,6 +126,49 @@ run-clang-tidy -p build/debug 'tide/(src|tests)/'
 ```
 
 A finding is fixed rather than suppressed. Where a fix is impossible or clearly worse (a POSIX API that takes `sockaddr*`, state shared with a signal handler, `getenv`), the line carries `NOLINT(<check>)` or `NOLINTNEXTLINE(<check>)` naming the check, followed by the reason. Two regions in `src/parser.cpp` are exempt as a whole, and say why: the keyword X-macros, and the lexy grammar productions, which stay snake_case so they do not clash with the AST types they build (the production `stmt` builds an `ast::Stmt`).
+
+## Continuous integration and releases
+
+Two GitHub Actions workflows live in `.github/workflows/`.
+
+`ci.yml` runs on every push and pull request. Its jobs mirror the local checks:
+
+| Job | Runs on | Equivalent local command |
+| --- | --- | --- |
+| Format | Ubuntu 24.04 | `clang-format-18 --dry-run --Werror` on every tracked `.cpp` and `.hpp` |
+| Lint | Ubuntu 24.04 | `cmake --preset lint && cmake --build --preset lint` |
+| Test | Ubuntu 24.04 (x86_64), macOS 15 (arm64) | `cmake --preset default && cmake --build --preset default && ctest --preset default` |
+
+`release.yml` builds the release binaries and publishes the GitHub release:
+
+| Asset | Built on | Runs on |
+| --- | --- | --- |
+| `tide-linux-x86_64.tar.gz` | Ubuntu 22.04, GCC 12 | glibc 2.35 or newer |
+| `tide-linux-arm64.tar.gz` | Ubuntu 22.04 arm64, GCC 12 | glibc 2.35 or newer |
+| `tide-macos-arm64.tar.gz` | macOS 15, Apple Clang | macOS 14 or newer (`MACOSX_DEPLOYMENT_TARGET`) |
+
+Each archive holds the stripped `tide` binary and `README.md`, and has a `.sha256` file next to it. The vcpkg dependencies are linked statically. On Linux, `-static-libstdc++ -static-libgcc` link the C++ runtime in too, so the binary needs only glibc. Each build job runs the unit tests, checks that `tide --version` matches the tag, and runs `tide check` on an example. Once the builds and the whole CI workflow (called from `release.yml`) pass, the publish job creates the GitHub release for the tag, attaches the archives, their `.sha256` files and a combined `checksums.txt`, and uses GitHub's generated release notes. Re-running the workflow for a tag that already has a release replaces its assets.
+
+Running `release.yml` by hand from the Actions tab (`workflow_dispatch`) is a dry run: everything is built and packaged and the archives are kept as run artifacts, but nothing is published.
+
+Both workflows check out vcpkg at the `builtin-baseline` commit and cache the built packages with `actions/cache`, keyed by job, platform, `vcpkg.json` and runner image. A cold build of the dependencies takes several minutes; a cached one takes seconds.
+
+`install.sh` at the repository root is the installer linked from the README. It finds the latest release through the `releases/latest` redirect, downloads `tide-<os>-<arch>.tar.gz` and its `.sha256`, verifies it, and replaces the binary atomically. The archive names carry no version, so the installer and the release workflow must keep the same names.
+
+### Cutting a release
+
+The version is written in `project(tide VERSION ...)` in `CMakeLists.txt`. CMake passes it to the code as `TIDE_VERSION`, which `tide --version` prints. `vcpkg.json` has a `version-string` that must match, and the release workflow fails if it does not.
+
+1. Update the version in `CMakeLists.txt`, `vcpkg.json`, and the prose that names it (`README.md`, `docs/README.md`, `docs/reference/cli.md`). Commit the change and push it to `main`.
+2. Optionally run the Release workflow by hand on `main` as a dry run.
+3. Tag the commit and push the tag:
+
+   ```sh
+   git tag -a v0.2.0 -m "Tide 0.2.0"
+   git push origin v0.2.0
+   ```
+
+The tag must be `v` followed by the project version. A suffix (`v0.2.0-rc.1`) publishes a pre-release. The installer ignores pre-releases unless `TIDE_VERSION` names one. A tag that does not match the project version fails the workflow before anything is built.
 
 ## Code layout
 

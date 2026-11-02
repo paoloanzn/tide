@@ -57,6 +57,9 @@ target_compile_options(tide_solana_backend PRIVATE ${TIDE_WARNINGS})
 
 add_executable(tide src/main.cpp)
 target_link_libraries(tide PRIVATE tide_core tide_solana_backend)
+# project(VERSION) above is the single source of the version; the release
+# workflow refuses to publish a tag that does not match it.
+target_compile_definitions(tide PRIVATE TIDE_VERSION="${PROJECT_VERSION}")
 target_compile_options(tide PRIVATE ${TIDE_WARNINGS})
 
 option(TIDE_BUILD_TESTS "Build the Tide test suite" ON)

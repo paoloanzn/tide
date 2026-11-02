@@ -13,7 +13,7 @@ static/dynamic split and the lifecycle that this tutorial uses.
 
 You need:
 
-- `tide` on your `PATH`,
+- `tide` on your `PATH` (see [Installation](../../README.md#installation)),
 - Agave's `solana-test-validator` on your `PATH` (`tide up` starts it),
 - an empty working directory.
 

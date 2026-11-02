@@ -11,7 +11,7 @@ Diagnostics:
   MissingIncludes: Strict
   Includes:
     # Umbrella headers of third-party libraries are included as documented.
-    IgnoreHeader: ['lexy/.*', 'lexy_ext/.*', 'nlohmann/.*', 'catch2/.*', 'cpr/.*', 'bits/.*']
+    IgnoreHeader: ['lexy/.*', 'lexy_ext/.*', 'nlohmann/.*', 'catch2/.*', 'cpr/.*', 'bits/.*', 'asm/.*', 'asm-generic/.*']
 
 Index:
   Background: Build

@@ -24,6 +24,10 @@
 #include "solana_backend.hpp"
 #include "state_builder.hpp"
 
+#ifndef TIDE_VERSION
+#error "TIDE_VERSION is defined by CMakeLists.txt from project(VERSION)"
+#endif
+
 namespace {
 
 constexpr const char* usage = R"(usage: tide <command> <file.tid> [options]
@@ -100,7 +104,7 @@ bool print_info(const std::vector<std::string>& cli) {
         return true;
     }
     if (first == "--version" || first == "version") {
-        std::cout << "tide 0.1.0\n";
+        std::cout << "tide " << TIDE_VERSION << "\n";
         return true;
     }
     return false;

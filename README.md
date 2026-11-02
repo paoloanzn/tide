@@ -43,7 +43,47 @@ and no network is left running.
 
 ## Installation
 
-<!-- TBD -->
+Install the latest release, or update an existing install, with:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/paoloanzn/tide/main/install.sh | sh
+```
+
+The script downloads the archive for your platform from the
+[GitHub releases](https://github.com/paoloanzn/tide/releases), checks its
+SHA-256 checksum, and puts `tide` in `~/.local/bin`. Run the same command
+again to update. If `tide` is already at the latest version, the script
+says so and changes nothing.
+
+Prebuilt binaries are available for:
+
+| Platform | Requirement |
+|---|---|
+| Linux x86_64 and arm64 | glibc 2.35 or newer (Ubuntu 22.04+, Debian 12+, Fedora 36+) |
+| macOS on Apple silicon | macOS 14 or newer |
+
+The script reads these environment variables:
+
+| Variable | Effect |
+|---|---|
+| `TIDE_VERSION` | Install this release instead of the latest, e.g. `v0.1.0`. |
+| `TIDE_INSTALL_DIR` | Install into this directory instead of `~/.local/bin`. |
+| `TIDE_FORCE=1` | Reinstall even when that version is already installed. |
+
+Set them on the `sh` side of the pipe:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/paoloanzn/tide/main/install.sh | TIDE_VERSION=v0.1.0 sh
+```
+
+`tide up` also needs `solana-test-validator`, which comes with the
+[Solana CLI](https://docs.anza.xyz/cli/install). `tide check` does not.
+
+To install by hand, download `tide-<platform>.tar.gz` from a release, compare
+it against `checksums.txt`, and copy `tide` onto your `PATH`. To uninstall,
+delete the binary (`rm ~/.local/bin/tide`). For other platforms, build from
+source as described in
+[Architecture and contributing](docs/contributing/architecture.md#building-from-source).
 
 ## Quick Start
 

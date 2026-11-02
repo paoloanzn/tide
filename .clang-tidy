@@ -54,7 +54,9 @@ CheckOptions:
   readability-implicit-bool-conversion.AllowPointerConditions: true
   readability-function-cognitive-complexity.IgnoreMacros: true
   # Umbrella headers of third-party libraries are included as documented.
-  misc-include-cleaner.IgnoreHeaders: 'lexy/.*;lexy_ext/.*;nlohmann/.*;catch2/.*;cpr/.*;bits/.*'
+  # asm*/ are Linux kernel headers behind POSIX ones (SO_REUSEADDR comes from
+  # <sys/socket.h>); including them directly would break macOS builds.
+  misc-include-cleaner.IgnoreHeaders: 'lexy/.*;lexy_ext/.*;nlohmann/.*;catch2/.*;cpr/.*;bits/.*;asm/.*;asm-generic/.*'
   readability-identifier-naming.NamespaceCase: lower_case
   readability-identifier-naming.ClassCase: CamelCase
   readability-identifier-naming.EnumCase: CamelCase

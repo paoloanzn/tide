@@ -1,6 +1,5 @@
 #include "solana_backend.hpp"
 
-#include <asm-generic/socket.h>
 #include <cpr/cpr.h>
 #include <nlohmann/json.hpp>
 // POSIX declares mkstemp, kill, sigaction, nanosleep and the wait macros in the
@@ -16,6 +15,9 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#if defined(__APPLE__)
+#include <crt_externs.h>  // _NSGetEnviron
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -137,6 +139,16 @@ bool port_in_use(std::uint16_t port) {
 
 bool process_alive(pid_t pid) { return pid > 0 && (::kill(pid, 0) == 0 || errno == EPERM); }
 
+// The environment children inherit. macOS declares no `environ`; it exposes
+// the same pointer through _NSGetEnviron.
+char** process_environment() {
+#if defined(__APPLE__)
+    return *_NSGetEnviron();
+#else
+    return environ;
+#endif
+}
+
 // Spawns `argv` in a new session with stdout/stderr appended to `log_path`.
 // Takes `argv` by value: posix_spawnp wants mutable `char*` arguments.
 pid_t spawn_process(std::vector<std::string> argv, const fs::path& log_path) {
@@ -153,7 +165,7 @@ pid_t spawn_process(std::vector<std::string> argv, const fs::path& log_path) {
     for (auto& a : argv) args.push_back(a.data());
     args.push_back(nullptr);
     pid_t pid = 0;
-    const int rc = posix_spawnp(&pid, args[0], &actions, &attr, args.data(), environ);
+    const int rc = posix_spawnp(&pid, args[0], &actions, &attr, args.data(), process_environment());
     posix_spawn_file_actions_destroy(&actions);
     posix_spawnattr_destroy(&attr);
     if (rc != 0) throw std::runtime_error("failed to start " + argv[0] + ": " + std::generic_category().message(rc));

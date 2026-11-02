@@ -1,0 +1,111 @@
+# Format check, clang-tidy lint with warnings as errors, and the test suite on
+# Linux and macOS. Runs on every push and pull request; the release workflow
+# also calls it so a tag is only published when CI passes on that commit.
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  format:
+    name: Format
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install clang-format
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq clang-format-18
+      - name: Check formatting
+        run: git ls-files '*.cpp' '*.hpp' | xargs clang-format-18 --dry-run --Werror
+
+  lint:
+    name: Lint (clang-tidy, -Werror)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install build tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ninja-build autoconf autoconf-archive automake libtool pkg-config clang-tidy-18
+      - &vcpkg-setup
+        name: Set up vcpkg at the manifest baseline
+        run: |
+          baseline=$(sed -n 's/.*"builtin-baseline": *"\([0-9a-f]*\)".*/\1/p' vcpkg.json)
+          root="$RUNNER_TEMP/vcpkg"
+          git -c init.defaultBranch=main init -q "$root"
+          git -C "$root" fetch -q --depth 1 https://github.com/microsoft/vcpkg.git "$baseline"
+          git -C "$root" checkout -q FETCH_HEAD
+          "$root/bootstrap-vcpkg.sh" -disableMetrics
+          mkdir -p "$RUNNER_TEMP/vcpkg-cache"
+          # The runner image version is part of the key: a new image brings a
+          # new compiler, which changes vcpkg's package hashes.
+          prefix="vcpkg-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('vcpkg.json') }}-"
+          {
+            echo "VCPKG_ROOT=$root"
+            echo "VCPKG_BINARY_SOURCES=clear;files,$RUNNER_TEMP/vcpkg-cache,readwrite"
+            echo "VCPKG_CACHE_PREFIX=$prefix"
+            echo "VCPKG_CACHE_KEY=$prefix${ImageVersion:-none}"
+          } >> "$GITHUB_ENV"
+      - &vcpkg-restore
+        name: Restore vcpkg packages
+        id: vcpkg-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}/vcpkg-cache
+          key: ${{ env.VCPKG_CACHE_KEY }}
+          restore-keys: ${{ env.VCPKG_CACHE_PREFIX }}
+      - name: Configure
+        run: cmake --preset lint
+      # Saved right after configure, where vcpkg builds the dependencies, so a
+      # lint failure later in the job does not throw the packages away.
+      - &vcpkg-save
+        name: Save vcpkg packages
+        if: steps.vcpkg-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ runner.temp }}/vcpkg-cache
+          key: ${{ env.VCPKG_CACHE_KEY }}
+      - name: Build with clang-tidy
+        run: cmake --build --preset lint
+
+  test:
+    name: Test (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x86_64
+            os: ubuntu-24.04
+          - target: macos-arm64
+            os: macos-15
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install build tools (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ninja-build autoconf autoconf-archive automake libtool pkg-config
+      - name: Install build tools (macOS)
+        if: runner.os == 'macOS'
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: '1'
+        run: brew install ninja autoconf autoconf-archive automake libtool pkgconf
+      - *vcpkg-setup
+      - *vcpkg-restore
+      - name: Configure
+        run: cmake --preset default
+      - *vcpkg-save
+      - name: Build
+        run: cmake --build --preset default
+      - name: Test
+        run: ctest --preset default

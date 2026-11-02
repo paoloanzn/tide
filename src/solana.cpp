@@ -372,7 +372,10 @@ constexpr Pubkey sysvar_epoch_schedule = pubkey_literal("SysvarEpochSchedu1e1111
 }  // namespace ids
 
 std::uint64_t rent_exempt_minimum(std::size_t data_len) {
-    return (static_cast<std::uint64_t>(data_len) + 128) * 3480 * 2;
+    // Widened implicitly: size_t is uint64_t on Linux but a distinct type on
+    // macOS, so a cast is useless on one and needed on the other.
+    const std::uint64_t len = data_len;
+    return (len + 128) * 3480 * 2;
 }
 
 // ------------------------------------------------------------------ borsh --
