@@ -5,13 +5,24 @@
 //   tide down <file.tid> [--network N]    stop a network launched by `tide up`
 #include <unistd.h>
 
-#include <cstring>
+#include <algorithm>
+#include <cstddef>
+#include <filesystem>
 #include <iostream>
+#include <span>
+#include <string>
+#include <string_view>
+#include <system_error>
+#include <variant>
+#include <vector>
 
+#include "ast.hpp"
+#include "diag.hpp"
 #include "interp.hpp"
 #include "parser.hpp"
 #include "sema.hpp"
 #include "solana_backend.hpp"
+#include "state_builder.hpp"
 
 namespace {
 
@@ -39,32 +50,37 @@ struct Args {
     bool no_scenarios = false, dry_run = false;
 };
 
-bool parse_args(int argc, char** argv, Args& a, std::string& err) {
+// Where the value of option `opt` is stored, or nullptr if `opt` takes no
+// value. `--scenario` is repeatable, so each occurrence appends a new entry.
+std::string* value_slot(Args& a, std::string_view opt) {
+    if (opt == "--network") return &a.network;
+    if (opt == "--scenario") return &a.scenarios.emplace_back();
+    if (opt == "--state-dir") return &a.state_dir;
+    if (opt == "--validator") return &a.validator;
+    if (opt == "--solana") return &a.solana;
+    return nullptr;
+}
+
+// `cli` is the full argument vector, program name included.
+bool parse_args(const std::vector<std::string>& cli, Args& a, std::string& err) {
     std::vector<std::string> pos;
-    for (int i = 1; i < argc; ++i) {
-        std::string s = argv[i];
-        auto value = [&](std::string& out) {
-            if (i + 1 >= argc) {
+    for (std::size_t i = 1; i < cli.size(); ++i) {
+        const std::string& s = cli[i];
+        if (std::string* slot = value_slot(a, s)) {
+            if (i + 1 >= cli.size()) {
                 err = s + " requires a value";
                 return false;
             }
-            out = argv[++i];
-            return true;
-        };
-        if (s == "--network") { if (!value(a.network)) return false; }
-        else if (s == "--scenario") {
-            std::string v;
-            if (!value(v)) return false;
-            a.scenarios.push_back(v);
-        } else if (s == "--state-dir") { if (!value(a.state_dir)) return false; }
-        else if (s == "--validator") { if (!value(a.validator)) return false; }
-        else if (s == "--solana") { if (!value(a.solana)) return false; }
-        else if (s == "--no-scenarios") a.no_scenarios = true;
-        else if (s == "--dry-run") a.dry_run = true;
+            *slot = cli[++i];
+        } else if (s == "--no-scenarios")
+            a.no_scenarios = true;
+        else if (s == "--dry-run")
+            a.dry_run = true;
         else if (s.starts_with("--")) {
             err = "unknown option " + s;
             return false;
-        } else pos.push_back(s);
+        } else
+            pos.push_back(s);
     }
     if (pos.size() != 2) {
         err = pos.empty() ? "missing command" : "expected a command and a file";
@@ -75,20 +91,99 @@ bool parse_args(int argc, char** argv, Args& a, std::string& err) {
     return true;
 }
 
+// Handles `help` / `version` and their aliases; returns true if one was asked for.
+bool print_info(const std::vector<std::string>& cli) {
+    if (cli.size() < 2) return false;
+    const std::string& first = cli[1];
+    if (first == "--help" || first == "-h" || first == "help") {
+        std::cout << usage;
+        return true;
+    }
+    if (first == "--version" || first == "version") {
+        std::cout << "tide 0.1.0\n";
+        return true;
+    }
+    return false;
+}
+
+// The network named by --network, or the only one declared. Reports and
+// returns nullptr when there is no such network or the choice is ambiguous.
+const tide::ast::NetworkDecl* select_network(const tide::sema::Program& program, const Args& args) {
+    if (!args.network.empty()) {
+        const tide::ast::NetworkDecl* network = program.find_network(args.network);
+        if (!network) std::cerr << "tide: no network named '" << args.network << "' in " << args.file << "\n";
+        return network;
+    }
+    const auto networks = program.networks();
+    if (networks.size() == 1) return networks.front();
+    std::cerr << "tide: "
+              << (networks.empty() ? "the file declares no network"
+                                   : "the file declares several networks; pick one with --network:");
+    for (const auto* n : networks) std::cerr << " " << n->name.name;
+    std::cerr << "\n";
+    return nullptr;
+}
+
+bool has_scenario(const tide::ast::NetworkDecl& network, std::string_view name) {
+    return std::ranges::any_of(network.entries, [&](const tide::ast::NetworkEntry& e) {
+        const auto* sc = std::get_if<tide::ast::ScenarioEntry>(&e.node);
+        return sc != nullptr && sc->name.name == name;
+    });
+}
+
+// Reports the first --scenario that `network` does not declare.
+bool check_scenarios_exist(const tide::ast::NetworkDecl& network, const std::vector<std::string>& wanted) {
+    for (const auto& name : wanted)
+        if (!has_scenario(network, name)) {
+            std::cerr << "tide: no scenario named '" << name << "' in network '" << network.name.name << "'\n";
+            return false;
+        }
+    return true;
+}
+
+void print_launch_summary(const tide::backend::LaunchInfo& launch, const std::string& network, const Args& args) {
+    std::cout << "\nnetwork '" << network << "' is running\n"
+              << "  rpc:   " << launch.rpc_url << "\n"
+              << "  state: " << launch.state_dir << "\n";
+    if (launch.pid) std::cout << "  pid:   " << *launch.pid << "\n";
+    std::cout << "  stop:  tide down " << args.file << (args.network.empty() ? "" : " --network " + args.network)
+              << "\n";
+}
+
+// `tide up`: configuration -> genesis -> bootstrap -> persist -> launch, then
+// scenarios. Returns the process exit code.
+int run_up(const tide::sema::Program& program, const tide::ast::NetworkDecl& network, const Args& args,
+           const std::filesystem::path& state_root, tide::Diagnostics& diags) {
+    tide::Interpreter interp(program, diags, std::cout);
+    if (!interp.init_globals()) return 1;
+    tide::backend::SolanaBackendOptions bopts;
+    bopts.state_root = state_root;
+    bopts.validator_binary = args.validator;
+    bopts.solana_cli = args.solana;
+    bopts.dry_run = args.dry_run;
+    tide::backend::SolanaTestValidatorBackend backend(bopts, diags, std::cout);
+    tide::RunOptions ropts;
+    ropts.dry_run = args.dry_run;
+    ropts.run_scenarios = !args.no_scenarios;
+    ropts.only_scenarios = args.scenarios;
+    const tide::RunResult result = interp.run(network, backend, ropts);
+    if (!result.ok) return 1;
+    if (result.launch) print_launch_summary(*result.launch, network.name.name, args);
+    if (result.scenarios_run != 0U)
+        std::cout << "scenarios: " << result.scenarios_run - result.scenarios_failed << " passed, "
+                  << result.scenarios_failed << " failed\n";
+    return (result.scenarios_failed != 0U) ? 3 : 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
-    if (argc >= 2 && (!std::strcmp(argv[1], "--help") || !std::strcmp(argv[1], "-h") || !std::strcmp(argv[1], "help"))) {
-        std::cout << usage;
-        return 0;
-    }
-    if (argc >= 2 && (!std::strcmp(argv[1], "--version") || !std::strcmp(argv[1], "version"))) {
-        std::cout << "tide 0.1.0\n";
-        return 0;
-    }
+    const std::span<char*> raw_args(argv, static_cast<std::size_t>(argc));
+    const std::vector<std::string> cli(raw_args.begin(), raw_args.end());
+    if (print_info(cli)) return 0;
     Args args;
     std::string err;
-    if (!parse_args(argc, argv, args, err)) {
+    if (!parse_args(cli, args, err)) {
         std::cerr << "tide: " << err << "\n\n" << usage;
         return 2;
     }
@@ -97,19 +192,19 @@ int main(int argc, char** argv) {
         return 2;
     }
 
-    const bool color = ::isatty(STDERR_FILENO);
+    const bool color = ::isatty(STDERR_FILENO) != 0;
     tide::SourceManager sources;
     tide::Diagnostics diags(sources);
     auto finish = [&](int code) {
         diags.print(std::cerr, color);
-        if (diags.error_count() || diags.warning_count())
+        if ((diags.error_count() != 0U) || (diags.warning_count() != 0U))
             std::cerr << diags.error_count() << " error(s), " << diags.warning_count() << " warning(s)\n";
         return code;
     };
 
     // Parse -> AST -> semantic validation.
     std::error_code ec;
-    std::filesystem::path path = std::filesystem::absolute(args.file, ec);
+    const std::filesystem::path path = std::filesystem::absolute(args.file, ec);
     const tide::SourceFile* file = sources.load(path);
     if (!file) {
         std::cerr << "tide: cannot read '" << args.file << "'\n";
@@ -125,36 +220,12 @@ int main(int argc, char** argv) {
         return finish(0);
     }
 
-    // Select the network.
-    const tide::ast::NetworkDecl* network = nullptr;
-    auto networks = program->networks();
-    if (!args.network.empty()) {
-        network = program->find_network(args.network);
-        if (!network) {
-            std::cerr << "tide: no network named '" << args.network << "' in " << args.file << "\n";
-            return finish(2);
-        }
-    } else if (networks.size() == 1) {
-        network = networks.front();
-    } else {
-        std::cerr << "tide: " << (networks.empty() ? "the file declares no network" : "the file declares several networks; pick one with --network:");
-        for (const auto* n : networks) std::cerr << " " << n->name.name;
-        std::cerr << "\n";
-        return finish(2);
-    }
+    const tide::ast::NetworkDecl* network = select_network(*program, args);
+    if (!network || !check_scenarios_exist(*network, args.scenarios)) return finish(2);
 
-    for (const auto& wanted : args.scenarios) {
-        bool found = false;
-        for (const auto& e : network->entries)
-            if (const auto* sc = std::get_if<tide::ast::ScenarioEntry>(&e.node); sc && sc->name.name == wanted) found = true;
-        if (!found) {
-            std::cerr << "tide: no scenario named '" << wanted << "' in network '" << network->name.name << "'\n";
-            return finish(2);
-        }
-    }
-
-    std::filesystem::path state_root =
-        args.state_dir.empty() ? tide::backend::default_state_root(path.parent_path()) : std::filesystem::path(args.state_dir);
+    const std::filesystem::path state_root = args.state_dir.empty()
+                                                 ? tide::backend::default_state_root(path.parent_path())
+                                                 : std::filesystem::path(args.state_dir);
     if (args.command == "down") {
         std::string error;
         if (!tide::backend::stop_network(state_root / network->name.name, std::cout, error)) {
@@ -165,30 +236,5 @@ int main(int argc, char** argv) {
         return finish(0);
     }
 
-    // Interpret configuration -> genesis -> bootstrap -> persist -> launch.
-    tide::Interpreter interp(*program, diags, std::cout);
-    if (!interp.init_globals()) return finish(1);
-    tide::backend::SolanaBackendOptions bopts;
-    bopts.state_root = state_root;
-    bopts.validator_binary = args.validator;
-    bopts.solana_cli = args.solana;
-    bopts.dry_run = args.dry_run;
-    tide::backend::SolanaTestValidatorBackend backend(bopts, diags, std::cout);
-    tide::RunOptions ropts;
-    ropts.dry_run = args.dry_run;
-    ropts.run_scenarios = !args.no_scenarios;
-    ropts.only_scenarios = args.scenarios;
-    tide::RunResult result = interp.run(*network, backend, ropts);
-    if (!result.ok) return finish(1);
-    if (result.launch) {
-        std::cout << "\nnetwork '" << network->name.name << "' is running\n"
-                  << "  rpc:   " << result.launch->rpc_url << "\n"
-                  << "  state: " << result.launch->state_dir << "\n";
-        if (result.launch->pid) std::cout << "  pid:   " << *result.launch->pid << "\n";
-        std::cout << "  stop:  tide down " << args.file << (args.network.empty() ? "" : " --network " + args.network) << "\n";
-    }
-    if (result.scenarios_run)
-        std::cout << "scenarios: " << result.scenarios_run - result.scenarios_failed << " passed, " << result.scenarios_failed
-                  << " failed\n";
-    return finish(result.scenarios_failed ? 3 : 0);
+    return finish(run_up(*program, *network, args, state_root, diags));
 }

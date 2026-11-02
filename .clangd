@@ -1,2 +1,30 @@
+# clangd configuration. Configure once with `cmake --preset default` so that
+# build/debug/compile_commands.json exists; clangd reads flags from it.
 CompileFlags:
-    CompilationDatabase: "build"
+  CompilationDatabase: build/debug
+  # GCC-only warnings from CMakeLists.txt that clang does not know.
+  Remove: [-Wduplicated-cond, -Wduplicated-branches, -Wlogical-op, -Wuseless-cast]
+
+Diagnostics:
+  # Lint with the checks in .clang-tidy (clangd picks it up automatically).
+  UnusedIncludes: Strict
+  MissingIncludes: Strict
+  Includes:
+    # Umbrella headers of third-party libraries are included as documented.
+    IgnoreHeader: ['lexy/.*', 'lexy_ext/.*', 'nlohmann/.*', 'catch2/.*', 'cpr/.*', 'bits/.*']
+
+Index:
+  Background: Build
+  StandardLibrary: Yes
+
+InlayHints:
+  Enabled: true
+  ParameterNames: true
+  DeducedTypes: true
+  Designators: true
+
+Hover:
+  ShowAKA: true
+
+Completion:
+  AllScopes: true

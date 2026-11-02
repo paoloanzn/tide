@@ -2,6 +2,7 @@
 #pragma once
 
 #include <optional>
+#include <string_view>
 
 #include "ast.hpp"
 #include "diag.hpp"

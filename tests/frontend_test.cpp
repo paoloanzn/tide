@@ -2,15 +2,42 @@
 // accepted) before any execution happens.
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
+#include <cstddef>
+#include <filesystem>
 #include <fstream>
+#include <memory>
+#include <optional>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <utility>
 
+#include "ast.hpp"
+#include "diag.hpp"
 #include "parser.hpp"
 #include "sema.hpp"
 
-using namespace tide;
+namespace ast = tide::ast;
 namespace fs = std::filesystem;
+namespace sema = tide::sema;
+using tide::Diagnostics;
+using tide::is_reserved_keyword;
+using tide::parse_document;
+using tide::Severity;
+using tide::SourceFile;
+using tide::SourceManager;
 
 namespace {
+
+// clang-tidy's optional-access analysis cannot see that a preceding REQUIRE aborts the test, so values the test has
+// already required are unwrapped through this explicit check (an empty optional fails the test with this message).
+// Taking an lvalue keeps the returned reference from outliving a temporary optional.
+template <class Optional>
+decltype(auto) must(Optional& opt) {
+    if (!opt) throw std::logic_error("expected a value, got an empty optional");
+    return *opt;
+}
 
 struct Compiled {
     SourceManager sm;
@@ -18,21 +45,20 @@ struct Compiled {
     std::optional<ast::Document> doc;
     std::unique_ptr<sema::Program> prog;
 
-    bool ok() const { return prog != nullptr && !diags.has_errors(); }
+    [[nodiscard]] bool ok() const { return prog != nullptr && !diags.has_errors(); }
 
-    std::string dump() const {
+    [[nodiscard]] std::string dump() const {
         std::string s;
         for (const auto& d : diags.all()) s += diags.format(d);
         return s;
     }
 
     // True if some diagnostic of `sev` contains `text` and (if given) sits on `line`.
-    bool has(std::string_view text, int line = -1, Severity sev = Severity::error) const {
-        for (const auto& d : diags.all()) {
-            if (d.severity != sev || d.message.find(text) == std::string::npos) continue;
-            if (line < 0 || (d.loc && static_cast<int>(sm.locate(d.loc.ptr).line) == line)) return true;
-        }
-        return false;
+    [[nodiscard]] bool has(std::string_view text, int line = -1, Severity sev = Severity::error) const {
+        return std::ranges::any_of(diags.all(), [&](const auto& d) {
+            if (d.severity != sev || d.message.find(text) == std::string::npos) return false;
+            return line < 0 || (d.loc && static_cast<int>(sm.locate(d.loc.ptr).line) == line);
+        });
     }
 };
 
@@ -40,7 +66,7 @@ std::unique_ptr<Compiled> compile(const std::string& src, fs::path path = "test.
     auto c = std::make_unique<Compiled>();
     const SourceFile* f = c->sm.add(std::move(path), src);
     c->doc = parse_document(*f, c->diags);
-    if (c->doc) c->prog = sema::analyze(*c->doc, c->sm, c->diags);
+    if (auto& doc = c->doc) c->prog = sema::analyze(*doc, c->sm, c->diags);
     return c;
 }
 
@@ -49,11 +75,11 @@ std::unique_ptr<Compiled> compile_file(const fs::path& path) {
     const SourceFile* f = c->sm.load(path);
     REQUIRE(f);
     c->doc = parse_document(*f, c->diags);
-    if (c->doc) c->prog = sema::analyze(*c->doc, c->sm, c->diags);
+    if (auto& doc = c->doc) c->prog = sema::analyze(*doc, c->sm, c->diags);
     return c;
 }
 
-const fs::path examples = TIDE_EXAMPLES_DIR;
+constexpr std::string_view examples_dir = TIDE_EXAMPLES_DIR;
 
 }  // namespace
 
@@ -65,7 +91,7 @@ TEST_CASE("design-document examples parse", "[parser]") {
         INFO(name);
         SourceManager sm;
         Diagnostics d(sm);
-        const SourceFile* f = sm.load(examples / (std::string(name) + ".tid"));
+        const SourceFile* f = sm.load(fs::path(examples_dir) / (std::string(name) + ".tid"));
         REQUIRE(f);
         CHECK(parse_document(*f, d).has_value());
         CHECK_FALSE(d.has_errors());
@@ -75,19 +101,19 @@ TEST_CASE("design-document examples parse", "[parser]") {
 TEST_CASE("design-document examples: semantic validation", "[sema]") {
     for (const char* name : {"01_multi_validator", "02_prefund", "03_spl_mint", "07_e2e_tokens"}) {
         INFO(name);
-        auto c = compile_file(examples / (std::string(name) + ".tid"));
+        auto c = compile_file(fs::path(examples_dir) / (std::string(name) + ".tid"));
         INFO(c->dump());
         CHECK(c->ok());
     }
     // A placeholder address is caught statically.
-    auto fork = compile_file(examples / "04_fork_mainnet.tid");
+    auto fork = compile_file(fs::path(examples_dir) / "04_fork_mainnet.tid");
     CHECK(fork->has("invalid pubkey", 5));
     // Live-network features are reserved for a later version.
-    auto sc = compile_file(examples / "05_scenarios.tid");
+    auto sc = compile_file(fs::path(examples_dir) / "05_scenarios.tid");
     CHECK(sc->has("'snapshot' is reserved", 3));
     CHECK(sc->has("'warp' is reserved", 5));
     CHECK(sc->has("'restore' is reserved", 7));
-    auto defi = compile_file(examples / "06_local_defi.tid");
+    auto defi = compile_file(fs::path(examples_dir) / "06_local_defi.tid");
     CHECK(defi->diags.error_count() == 1);
     CHECK(defi->has("'snapshot' is reserved", 54));
 }
@@ -113,10 +139,19 @@ TEST_CASE("syntax errors carry precise positions", "[parser]") {
     CHECK(compile("/* never closed")->has("expected '*/'"));
 }
 
+TEST_CASE("string literal locations span the source text, quotes and escapes included", "[parser]") {
+    for (const std::string_view literal : {R"("hello")", R"("")", R"("a\nb\"c")", R"("café \\")"}) {
+        auto c = compile("let s = " + std::string(literal) + ";");
+        REQUIRE(c->ok());
+        const auto& let = std::get<ast::LetStmt>(must(c->doc).decls[0].node);
+        CHECK(std::string_view(let.init->loc.ptr, let.init->loc.len) == literal);
+    }
+}
+
 TEST_CASE("operator precedence and associativity", "[parser]") {
     auto c = compile("let x = 1 + 2 * 3 - 4 == 3 && !false || false;");
     REQUIRE(c->ok());
-    const auto& let = std::get<ast::LetStmt>(c->doc->decls[0].node);
+    const auto& let = std::get<ast::LetStmt>(must(c->doc).decls[0].node);
     const auto* top = let.init->as<ast::BinaryExpr>();
     REQUIRE(top);
     CHECK(top->op == ast::BinaryOp::or_);
@@ -124,11 +159,17 @@ TEST_CASE("operator precedence and associativity", "[parser]") {
     REQUIRE(conj);
     CHECK(conj->op == ast::BinaryOp::and_);
     const auto* eq = conj->lhs->as<ast::BinaryExpr>();
+    REQUIRE(eq);
     CHECK(eq->op == ast::BinaryOp::eq);
     const auto* sub = eq->lhs->as<ast::BinaryExpr>();  // (1 + 2*3) - 4
+    REQUIRE(sub);
     CHECK(sub->op == ast::BinaryOp::sub);
-    CHECK(sub->lhs->as<ast::BinaryExpr>()->op == ast::BinaryOp::add);
-    CHECK(sub->lhs->as<ast::BinaryExpr>()->rhs->as<ast::BinaryExpr>()->op == ast::BinaryOp::mul);
+    const auto* add = sub->lhs->as<ast::BinaryExpr>();
+    REQUIRE(add);
+    CHECK(add->op == ast::BinaryOp::add);
+    const auto* mul = add->rhs->as<ast::BinaryExpr>();
+    REQUIRE(mul);
+    CHECK(mul->op == ast::BinaryOp::mul);
 }
 
 TEST_CASE("comments, trailing commas, else-if and compound assignment parse", "[parser]") {
@@ -153,7 +194,9 @@ TEST_CASE("comments, trailing commas, else-if and compound assignment parse", "[
 TEST_CASE("numeric literals and units fold exactly", "[sema]") {
     auto c = compile("let a = 1.5 SOL; let b = 2 s; let c = 250 ms; let d = 7 lamports; let e = 0.25;");
     REQUIRE(c->ok());
-    auto num = [&](std::size_t i) { return std::get<ast::LetStmt>(c->doc->decls[i].node).init->as<ast::NumberLit>(); };
+    auto num = [&](std::size_t i) {
+        return std::get<ast::LetStmt>(must(c->doc).decls[i].node).init->as<ast::NumberLit>();
+    };
     CHECK(num(0)->int_value == 1'500'000'000);
     CHECK(num(1)->int_value == 2000);
     CHECK(num(2)->int_value == 250);
@@ -229,14 +272,16 @@ TEST_CASE("static type checking", "[sema]") {
 }
 
 TEST_CASE("schemas validate object literals statically", "[sema]") {
-    std::string schema = "schema Counter using anchor { value: u64; owner: pubkey; tag: Option<u8>; pair: (u8, string); }\n";
+    const std::string schema =
+        "schema Counter using anchor { value: u64; owner: pubkey; tag: Option<u8>; pair: (u8, string); }\n";
     CHECK(compile(schema + "let d = borsh(Counter, {value: 1, owner: seed(\"a\").pubkey, pair: [1, \"x\"]});")->ok());
     auto c = compile(schema + "let d = borsh(Counter, {valu: 1, owner: 2, pair: [1]});");
     CHECK(c->has("unknown field 'valu' for schema 'Counter'; did you mean 'value'?"));
     CHECK(c->has("expected pubkey, found int"));
     CHECK(c->has("expected 2 elements"));
     CHECK(c->has("missing field 'value'"));
-    CHECK(compile(schema + "let d = borsh(Counter, {value: 300000000000000000000, owner: seed(\"a\").pubkey, pair: [1, \"\"]});")
+    CHECK(compile(schema +
+                  "let d = borsh(Counter, {value: 300000000000000000000, owner: seed(\"a\").pubkey, pair: [1, \"\"]});")
               ->has("out of range for u64"));
     CHECK(compile("schema S using json { a: u8; }")->has("unknown schema format 'json'"));
     CHECK(compile("schema S using borsh { a: int; }")->has("sized integer type"));
@@ -256,7 +301,8 @@ TEST_CASE("statement contexts are enforced", "[sema]") {
     CHECK(compile("fn f() { mint seed(\"a\").pubkey { decimals = 1; } }")->has("only allowed inside genesis"));
     CHECK(compile("network n { genesis { return; } }")->has("'return' outside of a function"));
     CHECK(compile("network n { genesis { break; } }")->has("'break' outside of a loop"));
-    CHECK(compile("network n { genesis { keypair k = seed(\"k\"); } }")->has("only allowed at top level or directly inside a network"));
+    CHECK(compile("network n { genesis { keypair k = seed(\"k\"); } }")
+              ->has("only allowed at top level or directly inside a network"));
     CHECK(compile("fn f() -> int { return balance(seed(\"a\").pubkey); }")->has("reads network state"));
     CHECK(compile("let b = balance(seed(\"a\").pubkey);")->has("reads network state"));
     CHECK(compile("network n { genesis { let b = balance(seed(\"a\").pubkey); } }")->ok());
@@ -281,8 +327,11 @@ TEST_CASE("network structure validation", "[sema]") {
 // --------------------------------------------------- account validation --
 
 TEST_CASE("genesis declarations are validated before execution", "[sema]") {
-    auto net = [](const std::string& body) { return "keypair k = seed(\"k\");\nnetwork n { genesis {\n" + body + "\n} }"; };
-    CHECK(compile(net("account k.pubkey { owner = system_program(); }"))->has("missing required field 'lamports' in account"));
+    auto net = [](const std::string& body) {
+        return "keypair k = seed(\"k\");\nnetwork n { genesis {\n" + body + "\n} }";
+    };
+    CHECK(compile(net("account k.pubkey { owner = system_program(); }"))
+              ->has("missing required field 'lamports' in account"));
     CHECK(compile(net("account k.pubkey { lamports = 1; lamport = 2; }"))->has("did you mean 'lamports'?"));
     CHECK(compile(net("account k.pubkey { lamports = 1; lamports = 2; }"))->has("duplicate field 'lamports'"));
     CHECK(compile(net("account k { lamports = 1; }"))->has("expected pubkey, found keypair"));
@@ -292,31 +341,41 @@ TEST_CASE("genesis declarations are validated before execution", "[sema]") {
               ->has("executable account is owned by the system program", -1, Severity::warning));
     CHECK(compile(net("mint k.pubkey { decimals = 256; }"))->has("out of range for u8"));
     CHECK(compile(net("mint k.pubkey { supply = 1; }"))->has("missing required field 'decimals'"));
-    CHECK(compile(net("mint k.pubkey { decimals = 6; mint_authority = 5; }"))->has("expected Option<pubkey>, found int"));
-    CHECK(compile(net("mint k.pubkey { decimals = 6; extension transfer_hook {} }"))->has("unknown mint extension 'transfer_hook'"));
-    CHECK(compile(net("mint k.pubkey { decimals = 6; extension mint_close_authority { close_authority = null; } }"))->ok());
-    CHECK(compile(net("associated_token_account k.pubkey { mint = k.pubkey; owner = k.pubkey; extension immutable_owner {} }"))
+    CHECK(
+        compile(net("mint k.pubkey { decimals = 6; mint_authority = 5; }"))->has("expected Option<pubkey>, found int"));
+    CHECK(compile(net("mint k.pubkey { decimals = 6; extension transfer_hook {} }"))
+              ->has("unknown mint extension 'transfer_hook'"));
+    CHECK(compile(net("mint k.pubkey { decimals = 6; extension mint_close_authority { close_authority = null; } }"))
+              ->ok());
+    CHECK(compile(net("associated_token_account k.pubkey { mint = k.pubkey; owner = k.pubkey; extension "
+                      "immutable_owner {} }"))
               ->has("extensions are not supported in associated_token_account"));
     CHECK(compile(net("token_account k.pubkey { mint = k.pubkey; owner = k.pubkey; state = \"locked\"; }"))
               ->has("must be \"initialized\" or \"frozen\""));
     CHECK(compile(net("program p { id = k.pubkey; }"))->has("missing required field 'binary'"));
-    CHECK(compile(net("program p { id = k.pubkey; binary = \"a.so\"; } program p { id = k.pubkey; binary = \"b.so\"; }"))
-              ->has("duplicate program 'p'"));
+    CHECK(
+        compile(net("program p { id = k.pubkey; binary = \"a.so\"; } program p { id = k.pubkey; binary = \"b.so\"; }"))
+            ->has("duplicate program 'p'"));
     CHECK(compile(net("sysvar clok { slot = 1; }"))->has("did you mean 'clock'?"));
     CHECK(compile(net("sysvar clock { slots = 1; }"))->has("did you mean 'slot'?"));
-    CHECK(compile(net("clone program k.pubkey from \"devnet\" { lamports = 1; };"))->has("overrides are only supported when cloning accounts"));
+    CHECK(compile(net("clone program k.pubkey from \"devnet\" { lamports = 1; };"))
+              ->has("overrides are only supported when cloning accounts"));
     CHECK(compile(net("lookup_table k.pubkey { addresses = [k]; }"))->has("expected pubkey, found keypair"));
 }
 
 TEST_CASE("runtime statement validation", "[sema]") {
-    auto net = [](const std::string& body) { return "keypair k = seed(\"k\");\nnetwork n { bootstrap {\n" + body + "\n} }"; };
+    auto net = [](const std::string& body) {
+        return "keypair k = seed(\"k\");\nnetwork n { bootstrap {\n" + body + "\n} }";
+    };
     CHECK(compile(net("transaction { signers = [k]; }"))->has("transaction has no instructions"));
     CHECK(compile(net("transaction { signer = [k]; instruction system_program() { data = hex(\"\"); } }"))
               ->has("did you mean 'signers'?"));
-    CHECK(compile(net("transaction { signers = [k.pubkey]; instruction system_program() {} }"))->has("expected keypair, found pubkey"));
+    CHECK(compile(net("transaction { signers = [k.pubkey]; instruction system_program() {} }"))
+              ->has("expected keypair, found pubkey"));
     CHECK(compile(net("transaction { signers = [k]; instruction system_program() { accounts = [k]; } }"))
               ->has("expected account_meta, found keypair"));
-    CHECK(compile(net("transaction as t { signers = [k]; instruction system_program() { accounts = [k.pubkey, readonly(k.pubkey)]; } }\n"
+    CHECK(compile(net("transaction as t { signers = [k]; instruction system_program() { accounts = [k.pubkey, "
+                      "readonly(k.pubkey)]; } }\n"
                       "assert t.success && t.error == \"\";"))
               ->ok());
     CHECK(compile(net("invoke k.pubkey with { args = {}; };"))->has("missing required field 'method' in invoke"));
@@ -328,12 +387,14 @@ TEST_CASE("runtime statement validation", "[sema]") {
 // --------------------------------------------------------------- imports --
 
 TEST_CASE("imports resolve module members and detect cycles", "[sema]") {
-    fs::path dir = fs::temp_directory_path() / "tide_import_test";
+    const fs::path dir = fs::temp_directory_path() / "tide_import_test";
     fs::create_directories(dir);
-    std::ofstream(dir / "lib.tid") << "keypair admin = seed(\"admin\");\nfn lamports_of(n: int) -> int { return n * 1 SOL; }\n"
-                                      "schema Pair using borsh { a: u8; b: u8; }\n";
-    std::ofstream(dir / "main.tid") << "import \"lib.tid\" as lib;\n"
-                                       "network n { genesis { account lib.admin.pubkey { lamports = lib.lamports_of(2); } } }\n";
+    std::ofstream(dir / "lib.tid")
+        << "keypair admin = seed(\"admin\");\nfn lamports_of(n: int) -> int { return n * 1 SOL; }\n"
+           "schema Pair using borsh { a: u8; b: u8; }\n";
+    std::ofstream(dir / "main.tid")
+        << "import \"lib.tid\" as lib;\n"
+           "network n { genesis { account lib.admin.pubkey { lamports = lib.lamports_of(2); } } }\n";
     std::ofstream(dir / "typo.tid") << "import \"lib.tid\" as lib;\nlet x = lib.admn;\n";
     std::ofstream(dir / "a.tid") << "import \"b.tid\" as b;\n";
     std::ofstream(dir / "b.tid") << "import \"a.tid\" as a;\n";

@@ -4,7 +4,6 @@
 #pragma once
 
 #include <array>
-#include <compare>
 #include <cstdint>
 #include <optional>
 #include <span>
@@ -15,11 +14,13 @@
 
 namespace tide::sol {
 
+__extension__ using uint128 = unsigned __int128;  // borsh u128 (GCC/Clang extension)
 using Bytes = std::vector<std::uint8_t>;
 using ByteView = std::span<const std::uint8_t>;
 using Hash = std::array<std::uint8_t, 32>;
 
 inline ByteView as_bytes(std::string_view s) {
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast): unsigned char may view any object's bytes
     return {reinterpret_cast<const std::uint8_t*>(s.data()), s.size()};
 }
 
@@ -39,7 +40,7 @@ Hash sha256(std::initializer_list<ByteView> parts);
 struct Pubkey {
     std::array<std::uint8_t, 32> bytes{};
     auto operator<=>(const Pubkey&) const = default;
-    std::string base58() const { return base58_encode(bytes); }
+    [[nodiscard]] std::string base58() const { return base58_encode(bytes); }
     static std::optional<Pubkey> from_base58(std::string_view text);
     static Pubkey from_bytes(ByteView b);  // requires b.size() == 32
 };
@@ -56,8 +57,8 @@ struct Keypair {
     static Keypair from_name(std::string_view name);
     // Solana CLI JSON keypair file: [64 integers].
     static Keypair from_json(std::string_view json);
-    std::string to_json() const;
-    std::array<std::uint8_t, 64> sign(ByteView message) const;
+    [[nodiscard]] std::string to_json() const;
+    [[nodiscard]] std::array<std::uint8_t, 64> sign(ByteView message) const;
 };
 
 bool is_on_curve(const Pubkey& key);
@@ -67,8 +68,7 @@ bool is_on_curve(const Pubkey& key);
 constexpr std::size_t max_seeds = 16;
 constexpr std::size_t max_seed_len = 32;
 
-std::optional<Pubkey> create_program_address(const std::vector<Bytes>& seeds, std::uint8_t bump,
-                                             const Pubkey& program);
+std::optional<Pubkey> create_program_address(const std::vector<Bytes>& seeds, std::uint8_t bump, const Pubkey& program);
 // Throws std::invalid_argument for too many / too long seeds.
 std::pair<Pubkey, std::uint8_t> find_program_address(const std::vector<Bytes>& seeds, const Pubkey& program);
 Pubkey associated_token_address(const Pubkey& owner, const Pubkey& mint, const Pubkey& token_program);
@@ -95,9 +95,10 @@ public:
     void u16(std::uint16_t v) { uint_le(v, 2); }
     void u32(std::uint32_t v) { uint_le(v, 4); }
     void u64(std::uint64_t v) { uint_le(v, 8); }
-    void u128(unsigned __int128 v) { uint_le(v, 16); }
+    void u128(uint128 v) { uint_le(v, 16); }
     // The low `n` bytes of `v`, little-endian (any integer width up to 16 bytes).
-    void uint_le(unsigned __int128 v, int n) {
+    // NOLINTNEXTLINE(bugprone-easily-swappable-parameters): -Wconversion rejects a swapped call (narrows uint128)
+    void uint_le(uint128 v, int n) {
         for (int i = 0; i < n; ++i) out_.push_back(static_cast<std::uint8_t>(v >> (8 * i)));
     }
     void boolean(bool v) { u8(v ? 1 : 0); }
@@ -105,7 +106,10 @@ public:
     void f64(double v);
     void raw(ByteView b) { out_.insert(out_.end(), b.begin(), b.end()); }
     void pubkey(const Pubkey& p) { raw(p.bytes); }
-    void bytes(ByteView b) { u32(static_cast<std::uint32_t>(b.size())); raw(b); }  // Vec<u8>
+    void bytes(ByteView b) {
+        u32(static_cast<std::uint32_t>(b.size()));
+        raw(b);
+    }  // Vec<u8>
     void string(std::string_view s) { bytes(as_bytes(s)); }
     Bytes& data() { return out_; }
     Bytes take() { return std::move(out_); }
@@ -125,9 +129,9 @@ public:
     std::uint16_t u16() { return static_cast<std::uint16_t>(uint_le(2)); }
     std::uint32_t u32() { return static_cast<std::uint32_t>(uint_le(4)); }
     std::uint64_t u64() { return static_cast<std::uint64_t>(uint_le(8)); }
-    unsigned __int128 u128() { return uint_le(16); }
+    uint128 u128() { return uint_le(16); }
     // `n` little-endian bytes as an unsigned integer (n <= 16).
-    unsigned __int128 uint_le(int n);
+    uint128 uint_le(int n);
     bool boolean();
     float f32();
     double f64();
@@ -135,8 +139,8 @@ public:
     Pubkey pubkey() { return Pubkey::from_bytes(raw(32)); }
     Bytes bytes() { return raw(u32()); }
     std::string string();
-    std::size_t remaining() const { return data_.size() - pos_; }
-    std::size_t position() const { return pos_; }
+    [[nodiscard]] std::size_t remaining() const { return data_.size() - pos_; }
+    [[nodiscard]] std::size_t position() const { return pos_; }
 
 private:
     ByteView data_;
@@ -145,8 +149,8 @@ private:
 
 // ------------------------------------------------------------ SPL layouts --
 
-// Token-2022 TLV extensions supported by Tide.
-enum class ExtensionType : std::uint16_t {
+// Token-2022 TLV extensions supported by Tide (a u16 on the wire).
+enum class ExtensionType : std::uint8_t {
     mint_close_authority = 3,
     default_account_state = 6,
     immutable_owner = 7,

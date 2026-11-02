@@ -1,18 +1,88 @@
 // Solana primitives checked against vectors generated with solders 0.29
 // (Python bindings of the Solana Rust SDK). See the generator recipe at the
 // bottom of this file.
-#include <catch2/catch_test_macros.hpp>
-
 #include "solana.hpp"
 
-using namespace tide::sol;
+#include <catch2/catch_test_macros.hpp>
+
+#include <algorithm>
+#include <array>
+#include <cstdint>
+#include <optional>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+namespace ids = tide::sol::ids;
+using tide::sol::anchor_discriminator;
+using tide::sol::as_bytes;
+using tide::sol::associated_token_address;
+using tide::sol::base58_decode;
+using tide::sol::base58_encode;
+using tide::sol::base64_decode;
+using tide::sol::base64_encode;
+using tide::sol::BorshReader;
+using tide::sol::BorshWriter;
+using tide::sol::build_transaction;
+using tide::sol::Bytes;
+using tide::sol::ByteView;
+using tide::sol::create_program_address;
+using tide::sol::decode_mint;
+using tide::sol::decode_token_account;
+using tide::sol::DecodeError;
+using tide::sol::encode_lookup_table;
+using tide::sol::encode_mint;
+using tide::sol::encode_token_account;
+using tide::sol::ExtensionType;
+using tide::sol::find_program_address;
+using tide::sol::Hash;
+using tide::sol::hex_decode;
+using tide::sol::hex_encode;
+using tide::sol::Instruction;
+using tide::sol::is_on_curve;
+using tide::sol::Keypair;
+using tide::sol::lookup_table_meta_len;
+using tide::sol::LookupTableLayout;
+using tide::sol::mint_base_len;
+using tide::sol::MintLayout;
+using tide::sol::Pubkey;
+using tide::sol::pubkey_const;
+using tide::sol::rent_exempt_minimum;
+using tide::sol::sha256;
+using tide::sol::spl_transfer_data;
+using tide::sol::token_account_base_len;
+using tide::sol::TokenAccountLayout;
+using tide::sol::TokenAccountState;
 
 namespace {
 
-Bytes hex(const std::string& s) { return *hex_decode(s); }
+// clang-tidy's optional-access analysis cannot see that a preceding REQUIRE aborts the test, so values the test has
+// already required are unwrapped through this explicit check (an empty optional fails the test with this message).
+// Taking an lvalue keeps the returned reference from outliving a temporary optional.
+template <class Optional>
+decltype(auto) must(Optional& opt) {
+    if (!opt) throw std::logic_error("expected a value, got an empty optional");
+    return *opt;
+}
+
+// A temporary optional is unwrapped by value.
+template <class T>
+T must(std::optional<T>&& opt) {
+    if (!opt) throw std::logic_error("expected a value, got an empty optional");
+    return *std::move(opt);
+}
+
+// Decodes a hex test vector; a malformed vector is a bug in this file, not in the code under test.
+Bytes hex(std::string_view s) {
+    auto bytes = hex_decode(s);
+    if (!bytes) throw std::invalid_argument("malformed hex test vector");
+    return *std::move(bytes);
+}
 
 // {hex, on_curve} generated with solders 0.29.0
-const std::vector<std::pair<std::string, bool>> curve_vectors = {
+constexpr auto curve_vectors = std::to_array<std::pair<std::string_view, bool>>({
     {"df299516b500f8bd486b00b46686c8c5229a94539ffff63664c0890934d1ef4f", false},
     {"1676e820cd6100968f689719f2af91083c36612aa3ad411cbfbdc30dc489ac2f", false},
     {"7b90b08d7676d79df0ce8c4768991529b25d908dde3b6b99f2ef900163e935a8", false},
@@ -413,72 +483,251 @@ const std::vector<std::pair<std::string, bool>> curve_vectors = {
     {"c6887f20aa6e9b2a4cb6a32dcc63ffb64885902697eb903228d7cac4cdb6f5f2", true},
     {"022a971d328ccc4fc0d1bc926deaf4d87c4eeaf76e43ea5bcc474942e5aff50d", false},
     {"86b09837a4e4a5a19b44fa3b6f11ec7158fea9e9967481ee3321626621b7dbba", true},
+});
+struct PdaVector {
+    std::string_view program;
+    std::array<std::string_view, 3> seeds_hex;
+    std::string_view address;
+    int bump;
 };
-struct PdaVector { std::string program; std::vector<std::string> seeds_hex; std::string address; int bump; };
-const std::vector<PdaVector> pda_vectors = {
+constexpr auto pda_vectors = std::to_array<PdaVector>({
     {"11111111111111111111111111111111", {"74696465", "30", ""}, "HzNZj8ubbPZYFRxWLM5xngtyGAiVR9zCft5BoHfdDKwq", 254},
-    {"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", {"74696465", "31", "6b"}, "8Txkm1btQmbkj1M8JbhuLGqsjyZxqAYTmUXqsoAjSZ1k", 254},
-    {"BPFLoaderUpgradeab1e11111111111111111111111", {"74696465", "32", "d473"}, "HQKkNfqa4c1KP4NchJHAnXeh5EG2SzDc9cu33KzKS1fo", 255},
-    {"11111111111111111111111111111111", {"74696465", "33", "4e0740"}, "Trp22XewfAvXidTSPbW26Zb29QKxLvr1YjjaM4FAWhf", 254},
-    {"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", {"74696465", "34", "4b227777"}, "qqEgHFqn3WfA3gZ5nq4donuD8VvdmgH1kLpLdyDr69A", 255},
-    {"BPFLoaderUpgradeab1e11111111111111111111111", {"74696465", "35", "ef2d127de3"}, "iE9hNhTRe8hz9ZYgKsZUbiRsUoCqN9KDfxG5AQpMoVR", 255},
-    {"11111111111111111111111111111111", {"74696465", "36", "e7f6c011776e"}, "ZjSLrb7Quuh56zjdERt2MPD8ugNE3VUeVhX7EFyJFsv", 253},
-    {"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", {"74696465", "37", "7902699be42c8a"}, "ZpsvXLEwJKiGLezUmpR3TFnCgCc9j7oBhtiUaAUs8Vn", 254},
-    {"BPFLoaderUpgradeab1e11111111111111111111111", {"74696465", "38", "2c624232cdd22177"}, "2xs41ss85GHRTCERXN6NnvZkkrxxXHsYVBf7SajxY9Z8", 253},
-    {"11111111111111111111111111111111", {"74696465", "39", "19581e27de7ced00ff"}, "9jQX12Zgqc7Yd7NUfTZTQBipFoJUwWDurxmXakyK1Uqk", 252},
-    {"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", {"74696465", "3130", "4a44dc15364204a80fe8"}, "AeqZSVEy7oetqiDy8991i4TVSGYv87XdCazCkojTwed4", 255},
-    {"BPFLoaderUpgradeab1e11111111111111111111111", {"74696465", "3131", "4fc82b26aecb47d2868c4e"}, "HpDoaKydNDrGr2sxCuNLRPzEqF8mvwQEWtZ2sVHbsY3A", 254},
-    {"11111111111111111111111111111111", {"74696465", "3132", "6b51d431df5d7f141cbececc"}, "HqsR6cMmX9V52WD9BvjGWBZcJoWsufTKmwixJX6tXHdo", 255},
-    {"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", {"74696465", "3133", "3fdba35f04dc8c462986c992bc"}, "Ab7jGEE3NzG9f5wi6BhaW3b17GXjws5kCgUDUS7k5ACA", 251},
-    {"BPFLoaderUpgradeab1e11111111111111111111111", {"74696465", "3134", "8527a891e224136950ff32ca212b"}, "2mHJokqZjrkfcfVPLxKz5McrbXxNnHLhFt7EDK3oFdF2", 255},
-    {"11111111111111111111111111111111", {"74696465", "3135", "e629fa6598d732768f7c726b4b6212"}, "4PS4c5WjypMVnboSKGcrmMGpPfJRwYaEjWqLaSDod3AH", 254},
-    {"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", {"74696465", "3136", "b17ef6d19c7a5b1ee83b907c595526dc"}, "4vSfUUy5jzaXe66iADnj3uwUNzRRfZS5cqCGyPCoDu5M", 255},
-    {"BPFLoaderUpgradeab1e11111111111111111111111", {"74696465", "3137", "4523540f1504cd17100c4835e85b7eefd4"}, "9GiELBvazRrVrJCvKhUWwhpPChcH2ScrGZiDyUkueXJQ", 254},
-    {"11111111111111111111111111111111", {"74696465", "3138", "4ec9599fc203d176a301536c2e091a19bc85"}, "3HtovxHbpRSB3mfTQk9Uhq1io1Lrvx5cA3YahLohGa73", 254},
-    {"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", {"74696465", "3139", "9400f1b21cb527d7fa3d3eabba93557a18ebe7"}, "6LB1sY1JSf6RUgrNzpaNLKtwQEDTWd6nxeG2F1rEdemB", 254},
-    {"BPFLoaderUpgradeab1e11111111111111111111111", {"74696465", "3230", "f5ca38f748a1d6eaf726b8a42fb575c3c71f1864"}, "BjwUnBEDdFU4CULRvJMuopyBF4BfvxsmM5rbXhg2JEhF", 255},
-    {"11111111111111111111111111111111", {"74696465", "3231", "6f4b6612125fb3a0daecd2799dfd6c9c299424fd92"}, "C9sVvroYuVoUXS3FubXqMXLFQQHZLGBcjeVDKUq9h5pq", 254},
-    {"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", {"74696465", "3232", "785f3ec7eb32f30b90cd0fcf3657d388b5ff4297f2f9"}, "9JrgjGnJg2uCAt6Zm4myQi7J52xowt7NGvJKns7Tiaau", 255},
-    {"BPFLoaderUpgradeab1e11111111111111111111111", {"74696465", "3233", "535fa30d7e25dd8a49f1536779734ec8286108d115da50"}, "DP1WozrDYuFA7XNRv1QXMceXsdGdDhij7K4XQfcvPeRd", 254},
-    {"11111111111111111111111111111111", {"74696465", "3234", "c2356069e9d1e79ca924378153cfbbfb4d4416b1f99d41a2"}, "3nATJFwB1FiXZbmuQ8fa5v3xFhERrNYH5G9P62x9bYgS", 253},
-    {"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", {"74696465", "3235", "b7a56873cd771f2c446d369b649430b65a756ba278ff97ec81"}, "6wFDjUMRSZSoBTjzvMewShGWGdpmtBjsktNSA7g2DBWA", 255},
-    {"BPFLoaderUpgradeab1e11111111111111111111111", {"74696465", "3236", "5f9c4ab08cac7457e9111a30e4664920607ea2c115a1433d7be9"}, "AXQ9woevT3iCmxcNTfXrQ3PjDZJGGafBEvoFdHirsY5d", 254},
-    {"11111111111111111111111111111111", {"74696465", "3237", "670671cd97404156226e507973f2ab8330d3022ca96e0c93bdbdb3"}, "2cHjPnQe5WxJMJ4JKARpM8FGBHvgMkiQwBHndGBnTcDr", 254},
-    {"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", {"74696465", "3238", "59e19706d51d39f66711c2653cd7eb1291c94d9b55eb14bda74ce4dc"}, "Fo3nT3FPmG9ED6tZ6iapGQREUCmWKTNcfPNEjsze1jkF", 255},
-    {"BPFLoaderUpgradeab1e11111111111111111111111", {"74696465", "3239", "35135aaa6cc23891b40cb3f378c53a17a1127210ce60e125ccf03efcfd"}, "CCzPNxsny5NemBRV5ueCos3EyMSrAJt75Rtf3DBSaxuD", 255},
-    {"11111111111111111111111111111111", {"74696465", "3330", "624b60c58c9d8bfb6ff1886c2fd605d2adeb6ea4da576068201b6c6958ce"}, "5wnVvGaAy2dyGCYCkMSLz2R7FK9MZD5mu3U1YfHZxRsa", 255},
-    {"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", {"74696465", "3331", "eb1e33e8a81b697b75855af6bfcdbcbf7cbbde9f94962ceaec1ed8af21f5a5"}, "2VAs6XJmKLXbFSgMXtjj7e36jwShyk8yWNCwbyRVj6wb", 254},
-    {"BPFLoaderUpgradeab1e11111111111111111111111", {"74696465", "3332", "e29c9c180c6279b0b02abd6a1801c7c04082cf486ec027aa13515e4f3884bb6b"}, "9husSfeqY8EHriNWJVj4vEECBTznJaJG817VTUgE1VTq", 255},
+    {"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+     {"74696465", "31", "6b"},
+     "8Txkm1btQmbkj1M8JbhuLGqsjyZxqAYTmUXqsoAjSZ1k",
+     254},
+    {"BPFLoaderUpgradeab1e11111111111111111111111",
+     {"74696465", "32", "d473"},
+     "HQKkNfqa4c1KP4NchJHAnXeh5EG2SzDc9cu33KzKS1fo",
+     255},
+    {"11111111111111111111111111111111",
+     {"74696465", "33", "4e0740"},
+     "Trp22XewfAvXidTSPbW26Zb29QKxLvr1YjjaM4FAWhf",
+     254},
+    {"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+     {"74696465", "34", "4b227777"},
+     "qqEgHFqn3WfA3gZ5nq4donuD8VvdmgH1kLpLdyDr69A",
+     255},
+    {"BPFLoaderUpgradeab1e11111111111111111111111",
+     {"74696465", "35", "ef2d127de3"},
+     "iE9hNhTRe8hz9ZYgKsZUbiRsUoCqN9KDfxG5AQpMoVR",
+     255},
+    {"11111111111111111111111111111111",
+     {"74696465", "36", "e7f6c011776e"},
+     "ZjSLrb7Quuh56zjdERt2MPD8ugNE3VUeVhX7EFyJFsv",
+     253},
+    {"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+     {"74696465", "37", "7902699be42c8a"},
+     "ZpsvXLEwJKiGLezUmpR3TFnCgCc9j7oBhtiUaAUs8Vn",
+     254},
+    {"BPFLoaderUpgradeab1e11111111111111111111111",
+     {"74696465", "38", "2c624232cdd22177"},
+     "2xs41ss85GHRTCERXN6NnvZkkrxxXHsYVBf7SajxY9Z8",
+     253},
+    {"11111111111111111111111111111111",
+     {"74696465", "39", "19581e27de7ced00ff"},
+     "9jQX12Zgqc7Yd7NUfTZTQBipFoJUwWDurxmXakyK1Uqk",
+     252},
+    {"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+     {"74696465", "3130", "4a44dc15364204a80fe8"},
+     "AeqZSVEy7oetqiDy8991i4TVSGYv87XdCazCkojTwed4",
+     255},
+    {"BPFLoaderUpgradeab1e11111111111111111111111",
+     {"74696465", "3131", "4fc82b26aecb47d2868c4e"},
+     "HpDoaKydNDrGr2sxCuNLRPzEqF8mvwQEWtZ2sVHbsY3A",
+     254},
+    {"11111111111111111111111111111111",
+     {"74696465", "3132", "6b51d431df5d7f141cbececc"},
+     "HqsR6cMmX9V52WD9BvjGWBZcJoWsufTKmwixJX6tXHdo",
+     255},
+    {"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+     {"74696465", "3133", "3fdba35f04dc8c462986c992bc"},
+     "Ab7jGEE3NzG9f5wi6BhaW3b17GXjws5kCgUDUS7k5ACA",
+     251},
+    {"BPFLoaderUpgradeab1e11111111111111111111111",
+     {"74696465", "3134", "8527a891e224136950ff32ca212b"},
+     "2mHJokqZjrkfcfVPLxKz5McrbXxNnHLhFt7EDK3oFdF2",
+     255},
+    {"11111111111111111111111111111111",
+     {"74696465", "3135", "e629fa6598d732768f7c726b4b6212"},
+     "4PS4c5WjypMVnboSKGcrmMGpPfJRwYaEjWqLaSDod3AH",
+     254},
+    {"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+     {"74696465", "3136", "b17ef6d19c7a5b1ee83b907c595526dc"},
+     "4vSfUUy5jzaXe66iADnj3uwUNzRRfZS5cqCGyPCoDu5M",
+     255},
+    {"BPFLoaderUpgradeab1e11111111111111111111111",
+     {"74696465", "3137", "4523540f1504cd17100c4835e85b7eefd4"},
+     "9GiELBvazRrVrJCvKhUWwhpPChcH2ScrGZiDyUkueXJQ",
+     254},
+    {"11111111111111111111111111111111",
+     {"74696465", "3138", "4ec9599fc203d176a301536c2e091a19bc85"},
+     "3HtovxHbpRSB3mfTQk9Uhq1io1Lrvx5cA3YahLohGa73",
+     254},
+    {"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+     {"74696465", "3139", "9400f1b21cb527d7fa3d3eabba93557a18ebe7"},
+     "6LB1sY1JSf6RUgrNzpaNLKtwQEDTWd6nxeG2F1rEdemB",
+     254},
+    {"BPFLoaderUpgradeab1e11111111111111111111111",
+     {"74696465", "3230", "f5ca38f748a1d6eaf726b8a42fb575c3c71f1864"},
+     "BjwUnBEDdFU4CULRvJMuopyBF4BfvxsmM5rbXhg2JEhF",
+     255},
+    {"11111111111111111111111111111111",
+     {"74696465", "3231", "6f4b6612125fb3a0daecd2799dfd6c9c299424fd92"},
+     "C9sVvroYuVoUXS3FubXqMXLFQQHZLGBcjeVDKUq9h5pq",
+     254},
+    {"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+     {"74696465", "3232", "785f3ec7eb32f30b90cd0fcf3657d388b5ff4297f2f9"},
+     "9JrgjGnJg2uCAt6Zm4myQi7J52xowt7NGvJKns7Tiaau",
+     255},
+    {"BPFLoaderUpgradeab1e11111111111111111111111",
+     {"74696465", "3233", "535fa30d7e25dd8a49f1536779734ec8286108d115da50"},
+     "DP1WozrDYuFA7XNRv1QXMceXsdGdDhij7K4XQfcvPeRd",
+     254},
+    {"11111111111111111111111111111111",
+     {"74696465", "3234", "c2356069e9d1e79ca924378153cfbbfb4d4416b1f99d41a2"},
+     "3nATJFwB1FiXZbmuQ8fa5v3xFhERrNYH5G9P62x9bYgS",
+     253},
+    {"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+     {"74696465", "3235", "b7a56873cd771f2c446d369b649430b65a756ba278ff97ec81"},
+     "6wFDjUMRSZSoBTjzvMewShGWGdpmtBjsktNSA7g2DBWA",
+     255},
+    {"BPFLoaderUpgradeab1e11111111111111111111111",
+     {"74696465", "3236", "5f9c4ab08cac7457e9111a30e4664920607ea2c115a1433d7be9"},
+     "AXQ9woevT3iCmxcNTfXrQ3PjDZJGGafBEvoFdHirsY5d",
+     254},
+    {"11111111111111111111111111111111",
+     {"74696465", "3237", "670671cd97404156226e507973f2ab8330d3022ca96e0c93bdbdb3"},
+     "2cHjPnQe5WxJMJ4JKARpM8FGBHvgMkiQwBHndGBnTcDr",
+     254},
+    {"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+     {"74696465", "3238", "59e19706d51d39f66711c2653cd7eb1291c94d9b55eb14bda74ce4dc"},
+     "Fo3nT3FPmG9ED6tZ6iapGQREUCmWKTNcfPNEjsze1jkF",
+     255},
+    {"BPFLoaderUpgradeab1e11111111111111111111111",
+     {"74696465", "3239", "35135aaa6cc23891b40cb3f378c53a17a1127210ce60e125ccf03efcfd"},
+     "CCzPNxsny5NemBRV5ueCos3EyMSrAJt75Rtf3DBSaxuD",
+     255},
+    {"11111111111111111111111111111111",
+     {"74696465", "3330", "624b60c58c9d8bfb6ff1886c2fd605d2adeb6ea4da576068201b6c6958ce"},
+     "5wnVvGaAy2dyGCYCkMSLz2R7FK9MZD5mu3U1YfHZxRsa",
+     255},
+    {"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+     {"74696465", "3331", "eb1e33e8a81b697b75855af6bfcdbcbf7cbbde9f94962ceaec1ed8af21f5a5"},
+     "2VAs6XJmKLXbFSgMXtjj7e36jwShyk8yWNCwbyRVj6wb",
+     254},
+    {"BPFLoaderUpgradeab1e11111111111111111111111",
+     {"74696465", "3332", "e29c9c180c6279b0b02abd6a1801c7c04082cf486ec027aa13515e4f3884bb6b"},
+     "9husSfeqY8EHriNWJVj4vEECBTznJaJG817VTUgE1VTq",
+     255},
     {"11111111111111111111111111111111", {"74696465", "3333", ""}, "SZ4WQBxtaHgKKfoUrXSL9mJ22Akc8vp9zm96QeBSaQR", 253},
-    {"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", {"74696465", "3334", "86"}, "DySMw4NLwhdxWzomwUQXKP4LvLs1i4Nm51CkXb6ptbjK", 255},
-    {"BPFLoaderUpgradeab1e11111111111111111111111", {"74696465", "3335", "9f14"}, "DFrCmpHt4hwB4iUcj28n7V7dCj3e912k9qQKY9mFGKCg", 255},
-    {"11111111111111111111111111111111", {"74696465", "3336", "76a508"}, "3qHsvPpEda9Hcq1XdQTjexdz7MEM7dhtjCrgn1nBSEVN", 252},
-    {"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", {"74696465", "3337", "7a61b537"}, "2vSq8PGgdKdBqPNmYahsHeJ92GWo5huZEKvH4coWbN8f", 254},
-    {"BPFLoaderUpgradeab1e11111111111111111111111", {"74696465", "3338", "aea92132c4"}, "GJa2BpshHaX1ss6mYuJURHpgDKoiNn1EiAEmXKgR4Qhz", 251},
-    {"11111111111111111111111111111111", {"74696465", "3339", "0b918943df09"}, "G4DJKGoaEVpN3SwJVTZD5352cfMYjdsewbXaf2WoH8SK", 254},
-    {"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", {"74696465", "3430", "d59eced1ded07f"}, "4Gfm3L9JG9FeioppKYH9Wjuh4SMvypNReKtULTHgCC4c", 255},
-    {"BPFLoaderUpgradeab1e11111111111111111111111", {"74696465", "3431", "3d914f9348c9cc0f"}, "HpL9kt4SS7NnaLTLNDPkAcp1ruPgMgZzyQLPH93Jzde6", 255},
-    {"11111111111111111111111111111111", {"74696465", "3432", "73475cb40a568e8da8"}, "DeLKkRuTf1rHUGb6neX5XH8NiH5qSb2XTBGcrqrdvrFe", 254},
-    {"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", {"74696465", "3433", "44cb730c420480a0477b"}, "Gu83EZ64EEe7mrqFpWt1SGe4vr91HTU5iT7F2f77YB2u", 252},
-    {"BPFLoaderUpgradeab1e11111111111111111111111", {"74696465", "3434", "71ee45a3c0db9a9865f731"}, "DER6yTfV81PJbNhEywhcsFEXB6vMVZZn9SJKRGWgXUER", 255},
-    {"11111111111111111111111111111111", {"74696465", "3435", "811786ad1ae74adfdd20dd03"}, "F7RgJNbBNP9tR6LN2QCqmLd2xDudb469nD28wWADAYGZ", 255},
-    {"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", {"74696465", "3436", "25fc0e7096fc653718202dc30b"}, "DCbafbWffchuVwFXDKLDGr142j89Yaz798qJLQnzhAKi", 254},
-    {"BPFLoaderUpgradeab1e11111111111111111111111", {"74696465", "3437", "31489056e0916d59fe3add79e63f"}, "8vhhe4jTn3GzoQRd1iBAWAEJWPNuPsEBc1hQk2Z7mn28", 255},
-    {"11111111111111111111111111111111", {"74696465", "3438", "98010bd9270f9b100b6214a21754fd"}, "9fwLTVZhP7bg2HausPiDBgUsbW1mG3TrjByS5eJiRuCB", 255},
-    {"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", {"74696465", "3439", "0e17daca5f3e175f448bacace3bc0da4"}, "CZFomxqqeh3wLeiyBAc49CoovkuZL9qqw9nvLvBWFeib", 255},
-    {"BPFLoaderUpgradeab1e11111111111111111111111", {"74696465", "3530", "1a6562590ef19d1045d06c4055742d3828"}, "AdxTbcY9gSbA5vdcdzCt2shDx3XTP9nTJmMkwJUgiNSC", 253},
-    {"11111111111111111111111111111111", {"74696465", "3531", "031b4af5197ec30a926f48cf40e11a7dbc47"}, "J1WBQbJTWG88rWbgvvLA8B4JbvHWvzGVgmfiSFJgYbk6", 255},
-    {"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", {"74696465", "3532", "41cfc0d1f2d127b04555b7246d84019b4d2771"}, "GRirwF4WHW9p4areMGqffRNXTWSwU9V3uAtzBuakTSWz", 252},
-    {"BPFLoaderUpgradeab1e11111111111111111111111", {"74696465", "3533", "2858dcd1057d3eae7f7d5f782167e24b61153c01"}, "DL2gFz7iYHNTW1X36qJKqyyMHvDRDmWxqKHx3R2aqe92", 253},
-    {"11111111111111111111111111111111", {"74696465", "3534", "2fca346db656187102ce806ac732e06a62df0dbb28"}, "774Juf7CkVWcBCpspTsppYdz3iaFi7K21Bvdt4iBZkw4", 253},
-    {"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", {"74696465", "3535", "02d20bbd7e394ad5999a4cebabac9619732c343a4cac"}, "HFE9rcRZRSfSQest2uiYjfhBR6rqNXUhnCcgvrtBgrMg", 254},
-    {"BPFLoaderUpgradeab1e11111111111111111111111", {"74696465", "3536", "7688b6ef52555962d008fff894223582c484517cea7da4"}, "7iBzVLEsHM2QXcK2jEKaDA26QFRwkFqZdtN5eU7ceNvk", 255},
-    {"11111111111111111111111111111111", {"74696465", "3537", "c837649cce43f2729138e72cc315207057ac82599a59be72"}, "6RQp7nKFv3D4RUgzBJkM7KwPfDHB3UHXEp3Ap37c6arn", 254},
-    {"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", {"74696465", "3538", "6208ef0f7750c111548cf90b6ea1d0d0a66f6bff40dbef07cb"}, "8vQJhUHrfHSVQTM67c1Bpq962xpqoKWVssdfnGEc7zNd", 255},
-    {"BPFLoaderUpgradeab1e11111111111111111111111", {"74696465", "3539", "3e1e967e9b793e908f8eae83c74dba9bcccce6a5535b4b462bd9"}, "9tmGLJAztrK9pGmSpgMgakmLbCgRcQ8Rh836nNQyjVqZ", 250},
-};
+    {"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+     {"74696465", "3334", "86"},
+     "DySMw4NLwhdxWzomwUQXKP4LvLs1i4Nm51CkXb6ptbjK",
+     255},
+    {"BPFLoaderUpgradeab1e11111111111111111111111",
+     {"74696465", "3335", "9f14"},
+     "DFrCmpHt4hwB4iUcj28n7V7dCj3e912k9qQKY9mFGKCg",
+     255},
+    {"11111111111111111111111111111111",
+     {"74696465", "3336", "76a508"},
+     "3qHsvPpEda9Hcq1XdQTjexdz7MEM7dhtjCrgn1nBSEVN",
+     252},
+    {"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+     {"74696465", "3337", "7a61b537"},
+     "2vSq8PGgdKdBqPNmYahsHeJ92GWo5huZEKvH4coWbN8f",
+     254},
+    {"BPFLoaderUpgradeab1e11111111111111111111111",
+     {"74696465", "3338", "aea92132c4"},
+     "GJa2BpshHaX1ss6mYuJURHpgDKoiNn1EiAEmXKgR4Qhz",
+     251},
+    {"11111111111111111111111111111111",
+     {"74696465", "3339", "0b918943df09"},
+     "G4DJKGoaEVpN3SwJVTZD5352cfMYjdsewbXaf2WoH8SK",
+     254},
+    {"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+     {"74696465", "3430", "d59eced1ded07f"},
+     "4Gfm3L9JG9FeioppKYH9Wjuh4SMvypNReKtULTHgCC4c",
+     255},
+    {"BPFLoaderUpgradeab1e11111111111111111111111",
+     {"74696465", "3431", "3d914f9348c9cc0f"},
+     "HpL9kt4SS7NnaLTLNDPkAcp1ruPgMgZzyQLPH93Jzde6",
+     255},
+    {"11111111111111111111111111111111",
+     {"74696465", "3432", "73475cb40a568e8da8"},
+     "DeLKkRuTf1rHUGb6neX5XH8NiH5qSb2XTBGcrqrdvrFe",
+     254},
+    {"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+     {"74696465", "3433", "44cb730c420480a0477b"},
+     "Gu83EZ64EEe7mrqFpWt1SGe4vr91HTU5iT7F2f77YB2u",
+     252},
+    {"BPFLoaderUpgradeab1e11111111111111111111111",
+     {"74696465", "3434", "71ee45a3c0db9a9865f731"},
+     "DER6yTfV81PJbNhEywhcsFEXB6vMVZZn9SJKRGWgXUER",
+     255},
+    {"11111111111111111111111111111111",
+     {"74696465", "3435", "811786ad1ae74adfdd20dd03"},
+     "F7RgJNbBNP9tR6LN2QCqmLd2xDudb469nD28wWADAYGZ",
+     255},
+    {"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+     {"74696465", "3436", "25fc0e7096fc653718202dc30b"},
+     "DCbafbWffchuVwFXDKLDGr142j89Yaz798qJLQnzhAKi",
+     254},
+    {"BPFLoaderUpgradeab1e11111111111111111111111",
+     {"74696465", "3437", "31489056e0916d59fe3add79e63f"},
+     "8vhhe4jTn3GzoQRd1iBAWAEJWPNuPsEBc1hQk2Z7mn28",
+     255},
+    {"11111111111111111111111111111111",
+     {"74696465", "3438", "98010bd9270f9b100b6214a21754fd"},
+     "9fwLTVZhP7bg2HausPiDBgUsbW1mG3TrjByS5eJiRuCB",
+     255},
+    {"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+     {"74696465", "3439", "0e17daca5f3e175f448bacace3bc0da4"},
+     "CZFomxqqeh3wLeiyBAc49CoovkuZL9qqw9nvLvBWFeib",
+     255},
+    {"BPFLoaderUpgradeab1e11111111111111111111111",
+     {"74696465", "3530", "1a6562590ef19d1045d06c4055742d3828"},
+     "AdxTbcY9gSbA5vdcdzCt2shDx3XTP9nTJmMkwJUgiNSC",
+     253},
+    {"11111111111111111111111111111111",
+     {"74696465", "3531", "031b4af5197ec30a926f48cf40e11a7dbc47"},
+     "J1WBQbJTWG88rWbgvvLA8B4JbvHWvzGVgmfiSFJgYbk6",
+     255},
+    {"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+     {"74696465", "3532", "41cfc0d1f2d127b04555b7246d84019b4d2771"},
+     "GRirwF4WHW9p4areMGqffRNXTWSwU9V3uAtzBuakTSWz",
+     252},
+    {"BPFLoaderUpgradeab1e11111111111111111111111",
+     {"74696465", "3533", "2858dcd1057d3eae7f7d5f782167e24b61153c01"},
+     "DL2gFz7iYHNTW1X36qJKqyyMHvDRDmWxqKHx3R2aqe92",
+     253},
+    {"11111111111111111111111111111111",
+     {"74696465", "3534", "2fca346db656187102ce806ac732e06a62df0dbb28"},
+     "774Juf7CkVWcBCpspTsppYdz3iaFi7K21Bvdt4iBZkw4",
+     253},
+    {"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+     {"74696465", "3535", "02d20bbd7e394ad5999a4cebabac9619732c343a4cac"},
+     "HFE9rcRZRSfSQest2uiYjfhBR6rqNXUhnCcgvrtBgrMg",
+     254},
+    {"BPFLoaderUpgradeab1e11111111111111111111111",
+     {"74696465", "3536", "7688b6ef52555962d008fff894223582c484517cea7da4"},
+     "7iBzVLEsHM2QXcK2jEKaDA26QFRwkFqZdtN5eU7ceNvk",
+     255},
+    {"11111111111111111111111111111111",
+     {"74696465", "3537", "c837649cce43f2729138e72cc315207057ac82599a59be72"},
+     "6RQp7nKFv3D4RUgzBJkM7KwPfDHB3UHXEp3Ap37c6arn",
+     254},
+    {"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+     {"74696465", "3538", "6208ef0f7750c111548cf90b6ea1d0d0a66f6bff40dbef07cb"},
+     "8vQJhUHrfHSVQTM67c1Bpq962xpqoKWVssdfnGEc7zNd",
+     255},
+    {"BPFLoaderUpgradeab1e11111111111111111111111",
+     {"74696465", "3539", "3e1e967e9b793e908f8eae83c74dba9bcccce6a5535b4b462bd9"},
+     "9tmGLJAztrK9pGmSpgMgakmLbCgRcQ8Rh836nNQyjVqZ",
+     250},
+});
 // create_program_address(["Talking", "Squirrels", bump], BPFLoaderUpgradeab1e...); empty = on curve
-const std::vector<std::pair<int, std::string>> cpa_vectors = {
+constexpr auto cpa_vectors = std::to_array<std::pair<int, std::string_view>>({
     {0, "9A25ePEdzyKzXN12A88rbNgmzHfFnMZzUJUsy84p4RNg"},
     {1, "7NK7nHWgkWG7bqwfT5LxcXVVGUh76mhp6kw3Vo2C3FFt"},
     {2, ""},
@@ -735,38 +984,67 @@ const std::vector<std::pair<int, std::string>> cpa_vectors = {
     {253, "BwEWVJSfwyFDpbtRhTdcYZGum1UJn2uuTWSmxCTrMTy3"},
     {254, "8UG5yBX8BiaoeKTWLrL4SAjpz3sDm26P3AEKsnxeSWeN"},
     {255, "HTqKuCuTUMwRJV4ceegG2CwYRxub4qjpj9DEg3nz1NGF"},
+});
+struct AtaVector {
+    std::string_view owner, mint, token_program, address;
 };
-struct AtaVector { std::string owner, mint, token_program, address; };
-const std::vector<AtaVector> ata_vectors = {
-    {"2NHp1R6aWkztMPV5oe4Y4MoAfyYbQNBSCvsHQKqbNjRr", "8DeGrBZxfCM8MmnQe83USz2cUrWeuTp8csSbeiE5VgZh", "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "94DFfAyjoyMJQhNtJPMcRNkHqHHfGV5FVagEQjZq6xHX"},
-    {"HZYLg7poMVQApuJpXgDQ3WJtNA41Luyu2PpEHPrAQhTY", "8omoWh9FDoNjj6x5HhvULDm1aPVQHng7LPW3FBx1XQnM", "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb", "DMFUEnhssVCdjvFBsiBnmnAYdmpFeiUysme31ZmUzMQj"},
-    {"4i2buXF67ktbbKvyVA2wuip3qrwzwiJyVNRVj1pg4Gje", "FqinZ7YgzXpSiRm8JPX1rgXYd8ZTqvXue5x6awm8RjB5", "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "GmoGPCfgxsL7Ek9NZC6KHkkVRv2jRb8buGpMQLA3ZuEu"},
-    {"4mBhfXnvUvT6PvCAVGZgEgtqkqW31yMfvNkgnTVEQTu8", "4QPLLomMKzTVeiCPfkJ9ux3ML6CkN5qEx9Yz8LZcLN8m", "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb", "BQ8KGNC6fpmv93wQgUSPjeLg7aqHFLwAhoMwBh8WDiSy"},
-    {"6TMGtsq9poV4qXvsU5QBRhJvYJtbsZqofbmX643jLtGu", "8qtn1tebECVwidcWdg74cDvMCPcjmiNGefz1xQzKj7HF", "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "Bbk6MR5DaBGbzarMbERwzkwxQa2znX51tvdxnCyJVusz"},
-    {"Eb7LPru7t3wuvurkgQg5Xjz64N7quUMcbyDbx45m339L", "HNrwMuEWocSPiG4gk6vUtztNqNbFD9A8WGGJRcPEALFb", "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb", "A29eN3XG58abbkzkHkjozphLTAEfcsFJrJyTj3QUsXX8"},
-    {"DRmSxkGbakisUjotaizaWGESoCJcwsfcNNuK8qwJxASh", "AsZ2H1GvCJPb73jKs1FmznmAzcmWzes14igWXrQ5kbSW", "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "EHajrj7Qn9E9wdjR48yihgfoad2kW2AfXQYPRm9YHncG"},
-    {"DRVjtpSRzBtmbYrZgTDv5G8wr538szadGkSXSFSwzbg4", "5FDHZFq8uwR5RCu6NZWstrmMX3hdegyGTKeaMFBfdNup", "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb", "HuFF7QmpfzHcVsV58jUkJA7NEGT95SLtQTx7neHdH3JG"},
-    {"DjcVX9mQ8BLaZvmWdRJiCNZPnMBYCVShLczBkgNRN189", "DrB3zwsLXZELPyEznoJgERkC3KCLKsuN9P44KnLwZSUf", "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "9WJyPcHXFqayZGC1f1Ky24jbPuE7YwoDbNUYdz9cEsKC"},
-    {"7caNKLZHe2G7BEwdCzJCfRkYRRk7XXYUjLQviS4SuqxW", "GFLc1PYrEf7NKPtkHsjScKtP9YQwhUwY1VCgWaXZN8Vc", "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb", "8XVh3SnNf7L75nERug4yDu4bmabijPxspw4yDJBYRdZ7"},
-    {"FX6bkREgU999hnfqUKUixgCUfTMLD9hf23TVMxoXvjG3", "5TiTFNsQatevLhRfRr8TY2JTjeNyAJ8fRZ7Ef6TcBoGD", "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "7Khut2F2szek8ivxbDKMoU7JMMtLvJnDxScV98ZeaRxk"},
-    {"GVk94iMREPNXR17zdkzHbx8iBVqoK9hYmjgyDAYcMBTa", "3EVeU6i36puaF7u3JViptkNqK4AdUdA9Y34rrAxnze5N", "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb", "7j116ARM55a85F2c35BJ7tBNey9F58v2g1XY6dKCYobE"},
-    {"Bp9MUi4t8cnpUA5EmvR13ePsiC9EYgAjmjVSDKGXtUPM", "Dt12V6oCS8sWMt8mroCVHxVbnV8utiABfHt4ZFabrHA8", "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "HSX4SmYTZgX3NjFi8mRfXVVCnDYho6pzWL4LifiQGDx4"},
-    {"6WTDxAMB2Cz9D9mQDHTg4WPJW4sUJoCTwsFJGcRNttaW", "34Q9AsACwRUyhFJKL9thP3asrtqTy15pKf3xjb1vYNMQ", "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb", "7xsw9rCNbLcxdqsgF76yH1Z3ck5vTXQV6zGKL2Pyq6BV"},
-    {"4c1zScj6gR35qAmfMH7vUbbGzVqDRmXU8774ZByNCm2W", "7FKeM13vFFzgZrLr9C7UFX3CzqxYuxzwyggGbnkFfZEG", "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "DZk5n8QyVywFv55hoTQAQCjnCqU7pBgb7AThDXs1fVXB"},
-    {"FzgZFaTY5SGh9sSUYCExT2bKhcDgPKZT42aKaxvqi5y4", "CWvFC222Qh5mji3rLjRgJ9whnR3Do3jqXBjCEkCsY22b", "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb", "8nNHCFFGVMWPfTijZ7KBKbk8uksnzLTq3mQDNc2eHpeu"},
-    {"CEFTRRskX9P4jcr53DwJm9AW3YotgVNtjB2X8fVB1NBG", "BwcqBgVNzk5a3LR3y8fb9RiRVaoJ8fGpUMusK5kAHSZz", "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "4W4G5GywsJ3RbJjYqmwDC878hpN986u1GDPB1jF2vU5V"},
-    {"AzkGJCwUxh8eq8LpMonvxZy1q2VodWjt9kFAtxi7L9Zw", "41J64CZo23o1gEoSxQW8Yt6iSzJ6uQdxQEbrvJCx5pwV", "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb", "9hoaGT8Fc5Tvwiuig3Eogedhyx5FMQaUm1aZZCEwc1H7"},
-    {"BFpsSsQzGwdQPm5M7YnKsALpM4PYfMkrAscgXXvxXjHU", "D33WonUW7GrVLcQSdsEMS6UEc6PtVFfi1DMJSknDtdhK", "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "8rJGf1qskw9qQ6qAShWahsEcA1SVkgv1U44Y9e1MooVW"},
-    {"7ZY775rU5naf8sBjipiCGoMbDrDH43qvaZdmaEn96zXA", "4EoqWGcGiat6YUKYt1hq5iseBF8aeE8XKEUy6kpUeoBd", "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb", "67iRXPFho8v5PiCpsTTHzWQVTLLax42WWgq8Dv1vqxke"},
-};
-const std::vector<std::pair<std::string, std::string>> seed_vectors = {
+constexpr auto ata_vectors = std::to_array<AtaVector>({
+    {"2NHp1R6aWkztMPV5oe4Y4MoAfyYbQNBSCvsHQKqbNjRr", "8DeGrBZxfCM8MmnQe83USz2cUrWeuTp8csSbeiE5VgZh",
+     "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "94DFfAyjoyMJQhNtJPMcRNkHqHHfGV5FVagEQjZq6xHX"},
+    {"HZYLg7poMVQApuJpXgDQ3WJtNA41Luyu2PpEHPrAQhTY", "8omoWh9FDoNjj6x5HhvULDm1aPVQHng7LPW3FBx1XQnM",
+     "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb", "DMFUEnhssVCdjvFBsiBnmnAYdmpFeiUysme31ZmUzMQj"},
+    {"4i2buXF67ktbbKvyVA2wuip3qrwzwiJyVNRVj1pg4Gje", "FqinZ7YgzXpSiRm8JPX1rgXYd8ZTqvXue5x6awm8RjB5",
+     "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "GmoGPCfgxsL7Ek9NZC6KHkkVRv2jRb8buGpMQLA3ZuEu"},
+    {"4mBhfXnvUvT6PvCAVGZgEgtqkqW31yMfvNkgnTVEQTu8", "4QPLLomMKzTVeiCPfkJ9ux3ML6CkN5qEx9Yz8LZcLN8m",
+     "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb", "BQ8KGNC6fpmv93wQgUSPjeLg7aqHFLwAhoMwBh8WDiSy"},
+    {"6TMGtsq9poV4qXvsU5QBRhJvYJtbsZqofbmX643jLtGu", "8qtn1tebECVwidcWdg74cDvMCPcjmiNGefz1xQzKj7HF",
+     "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "Bbk6MR5DaBGbzarMbERwzkwxQa2znX51tvdxnCyJVusz"},
+    {"Eb7LPru7t3wuvurkgQg5Xjz64N7quUMcbyDbx45m339L", "HNrwMuEWocSPiG4gk6vUtztNqNbFD9A8WGGJRcPEALFb",
+     "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb", "A29eN3XG58abbkzkHkjozphLTAEfcsFJrJyTj3QUsXX8"},
+    {"DRmSxkGbakisUjotaizaWGESoCJcwsfcNNuK8qwJxASh", "AsZ2H1GvCJPb73jKs1FmznmAzcmWzes14igWXrQ5kbSW",
+     "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "EHajrj7Qn9E9wdjR48yihgfoad2kW2AfXQYPRm9YHncG"},
+    {"DRVjtpSRzBtmbYrZgTDv5G8wr538szadGkSXSFSwzbg4", "5FDHZFq8uwR5RCu6NZWstrmMX3hdegyGTKeaMFBfdNup",
+     "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb", "HuFF7QmpfzHcVsV58jUkJA7NEGT95SLtQTx7neHdH3JG"},
+    {"DjcVX9mQ8BLaZvmWdRJiCNZPnMBYCVShLczBkgNRN189", "DrB3zwsLXZELPyEznoJgERkC3KCLKsuN9P44KnLwZSUf",
+     "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "9WJyPcHXFqayZGC1f1Ky24jbPuE7YwoDbNUYdz9cEsKC"},
+    {"7caNKLZHe2G7BEwdCzJCfRkYRRk7XXYUjLQviS4SuqxW", "GFLc1PYrEf7NKPtkHsjScKtP9YQwhUwY1VCgWaXZN8Vc",
+     "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb", "8XVh3SnNf7L75nERug4yDu4bmabijPxspw4yDJBYRdZ7"},
+    {"FX6bkREgU999hnfqUKUixgCUfTMLD9hf23TVMxoXvjG3", "5TiTFNsQatevLhRfRr8TY2JTjeNyAJ8fRZ7Ef6TcBoGD",
+     "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "7Khut2F2szek8ivxbDKMoU7JMMtLvJnDxScV98ZeaRxk"},
+    {"GVk94iMREPNXR17zdkzHbx8iBVqoK9hYmjgyDAYcMBTa", "3EVeU6i36puaF7u3JViptkNqK4AdUdA9Y34rrAxnze5N",
+     "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb", "7j116ARM55a85F2c35BJ7tBNey9F58v2g1XY6dKCYobE"},
+    {"Bp9MUi4t8cnpUA5EmvR13ePsiC9EYgAjmjVSDKGXtUPM", "Dt12V6oCS8sWMt8mroCVHxVbnV8utiABfHt4ZFabrHA8",
+     "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "HSX4SmYTZgX3NjFi8mRfXVVCnDYho6pzWL4LifiQGDx4"},
+    {"6WTDxAMB2Cz9D9mQDHTg4WPJW4sUJoCTwsFJGcRNttaW", "34Q9AsACwRUyhFJKL9thP3asrtqTy15pKf3xjb1vYNMQ",
+     "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb", "7xsw9rCNbLcxdqsgF76yH1Z3ck5vTXQV6zGKL2Pyq6BV"},
+    {"4c1zScj6gR35qAmfMH7vUbbGzVqDRmXU8774ZByNCm2W", "7FKeM13vFFzgZrLr9C7UFX3CzqxYuxzwyggGbnkFfZEG",
+     "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "DZk5n8QyVywFv55hoTQAQCjnCqU7pBgb7AThDXs1fVXB"},
+    {"FzgZFaTY5SGh9sSUYCExT2bKhcDgPKZT42aKaxvqi5y4", "CWvFC222Qh5mji3rLjRgJ9whnR3Do3jqXBjCEkCsY22b",
+     "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb", "8nNHCFFGVMWPfTijZ7KBKbk8uksnzLTq3mQDNc2eHpeu"},
+    {"CEFTRRskX9P4jcr53DwJm9AW3YotgVNtjB2X8fVB1NBG", "BwcqBgVNzk5a3LR3y8fb9RiRVaoJ8fGpUMusK5kAHSZz",
+     "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "4W4G5GywsJ3RbJjYqmwDC878hpN986u1GDPB1jF2vU5V"},
+    {"AzkGJCwUxh8eq8LpMonvxZy1q2VodWjt9kFAtxi7L9Zw", "41J64CZo23o1gEoSxQW8Yt6iSzJ6uQdxQEbrvJCx5pwV",
+     "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb", "9hoaGT8Fc5Tvwiuig3Eogedhyx5FMQaUm1aZZCEwc1H7"},
+    {"BFpsSsQzGwdQPm5M7YnKsALpM4PYfMkrAscgXXvxXjHU", "D33WonUW7GrVLcQSdsEMS6UEc6PtVFfi1DMJSknDtdhK",
+     "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "8rJGf1qskw9qQ6qAShWahsEcA1SVkgv1U44Y9e1MooVW"},
+    {"7ZY775rU5naf8sBjipiCGoMbDrDH43qvaZdmaEn96zXA", "4EoqWGcGiat6YUKYt1hq5iseBF8aeE8XKEUy6kpUeoBd",
+     "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb", "67iRXPFho8v5PiCpsTTHzWQVTLLax42WWgq8Dv1vqxke"},
+});
+constexpr auto seed_vectors = std::to_array<std::pair<std::string_view, std::string_view>>({
     {"alice", "HWrCL2DiCckyFMw4Z4BR8fWq1QHFGecjh19DReM3Epye"},
     {"bob", "CJHsd5oHaKftDqzDFiHpB3LqN82ftpdoYydM8qbEW6Zm"},
     {"admin", "E47x1E5KFevMHZsesS2TyNnk1wZBRiivHUxfAfiVsV1T"},
     {"usd", "CCrDymVfTunhmzpxP8kD9QxQ5DbB8rkd2niZCZz3FEGi"},
     {"", "7hdpVULS6vjsJhnS6gMH1SkRj1Dr6NZbB3yvwUJn8KNs"},
-};
-const std::string tx_vector_hex = "02dfc95bf9ae459d00be84c0a2b347cba397a9cdee319300bf0d93796eda0e2ac55a2d65505160c58282ac87a25127edb8dd285ceda669014f2cb985eb77c48600130f6df5de302ba81457e8008655b72af88b8269594fb7203593c653cc4a78cd015f3ac39a234a7b619c75250a31364b3b5d7d678aacebc8947e4eee8a7fc30202000205f56075a8403e5b2952fd5cb809aac7ef63ba1861b86be9ceb4f77c8b56641459285d1c5fed7cc0a1c41573ed26f596f02a836236bc47889951bcadc900438ce8a7de821129e3d847cf9d4d53321d0c9df67cbbd6a329bde2ad49ced73a5c7238054a535a992921064d24e87160da387c7c35b5ddbc92bb81e41fa8404105448d06ddf6e1d765a193d9cbe146ceeb79ac1cb485ed5f5b37913a8cf5857eff00a9395bf727f9aac5e80911591073fcf9c826f428804131ca089beba3869421749a020403020100090390d00300000000000301010568656c6c6f";
+});
+constexpr std::string_view tx_vector_hex =
+    "02dfc95bf9ae459d00be84c0a2b347cba397a9cdee319300bf0d93796eda0e2ac55a2d65505160c58282ac87a25127edb8dd285ceda669014f"
+    "2cb985eb77c48600130f6df5de302ba81457e8008655b72af88b8269594fb7203593c653cc4a78cd015f3ac39a234a7b619c75250a31364b3b"
+    "5d7d678aacebc8947e4eee8a7fc30202000205f56075a8403e5b2952fd5cb809aac7ef63ba1861b86be9ceb4f77c8b56641459285d1c5fed7c"
+    "c0a1c41573ed26f596f02a836236bc47889951bcadc900438ce8a7de821129e3d847cf9d4d53321d0c9df67cbbd6a329bde2ad49ced73a5c72"
+    "38054a535a992921064d24e87160da387c7c35b5ddbc92bb81e41fa8404105448d06ddf6e1d765a193d9cbe146ceeb79ac1cb485ed5f5b3791"
+    "3a8cf5857eff00a9395bf727f9aac5e80911591073fcf9c826f428804131ca089beba3869421749a020403020100090390d003000000000003"
+    "01010568656c6c6f";
 
 }  // namespace
 
@@ -776,27 +1054,28 @@ TEST_CASE("base58 round-trips and rejects invalid input", "[solana]") {
     CHECK(base58_encode(Bytes(32, 0)) == "11111111111111111111111111111111");
     auto sys = Pubkey::from_base58("11111111111111111111111111111111");
     REQUIRE(sys);
-    CHECK(*sys == Pubkey{});
+    CHECK(must(sys) == Pubkey{});
     CHECK(ids::token_program.base58() == "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
     CHECK_FALSE(base58_decode("0OIl").has_value());
     CHECK_FALSE(Pubkey::from_base58("REPLACE_WITH_BASE58_ADDRESS").has_value());
     CHECK_FALSE(Pubkey::from_base58("1111").has_value());  // wrong length
     for (int n = 0; n < 40; ++n) {
         Bytes b;
-        for (int i = 0; i < n; ++i) b.push_back(static_cast<std::uint8_t>((i * 37 + n) % 256 * (i % 3 != 0)));
-        CHECK(*base58_decode(base58_encode(b)) == b);
+        for (int i = 0; i < n; ++i)
+            b.push_back(static_cast<std::uint8_t>((i * 37 + n) % 256 * static_cast<int>(i % 3 != 0)));
+        CHECK(must(base58_decode(base58_encode(b))) == b);
     }
 }
 
 TEST_CASE("hex and base64 codecs", "[solana]") {
     CHECK(hex_encode(Bytes{0x00, 0xab, 0xff}) == "00abff");
-    CHECK(*hex_decode("0xABff") == (Bytes{0xab, 0xff}));
-    CHECK(*hex_decode("") == Bytes{});
+    CHECK(must(hex_decode("0xABff")) == (Bytes{0xab, 0xff}));
+    CHECK(must(hex_decode("")) == Bytes{});
     CHECK_FALSE(hex_decode("abc").has_value());
     CHECK_FALSE(hex_decode("zz").has_value());
     CHECK(base64_encode(as_bytes("hello")) == "aGVsbG8=");
     CHECK(base64_encode(as_bytes("hi!")) == "aGkh");
-    CHECK(*base64_decode("aGVsbG8=") == Bytes(as_bytes("hello").begin(), as_bytes("hello").end()));
+    CHECK(must(base64_decode("aGVsbG8=")) == Bytes(as_bytes("hello").begin(), as_bytes("hello").end()));
     CHECK_FALSE(base64_decode("a$==").has_value());
     CHECK(hex_encode(sha256(as_bytes("abc"))) == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
 }
@@ -811,6 +1090,7 @@ TEST_CASE("is_on_curve matches curve25519-dalek decompression", "[solana]") {
 TEST_CASE("find_program_address matches the Solana SDK", "[solana]") {
     for (const auto& v : pda_vectors) {
         std::vector<Bytes> seeds;
+        seeds.reserve(v.seeds_hex.size());
         for (const auto& s : v.seeds_hex) seeds.push_back(hex(s));
         auto [addr, bump] = find_program_address(seeds, pubkey_const(v.program));
         INFO(v.address);
@@ -820,15 +1100,16 @@ TEST_CASE("find_program_address matches the Solana SDK", "[solana]") {
 }
 
 TEST_CASE("create_program_address rejects on-curve results", "[solana]") {
-    std::vector<Bytes> seeds = {Bytes(as_bytes("Talking").begin(), as_bytes("Talking").end()),
-                                Bytes(as_bytes("Squirrels").begin(), as_bytes("Squirrels").end())};
+    const std::vector<Bytes> seeds = {Bytes(as_bytes("Talking").begin(), as_bytes("Talking").end()),
+                                      Bytes(as_bytes("Squirrels").begin(), as_bytes("Squirrels").end())};
     for (const auto& [bump, expected] : cpa_vectors) {
         auto addr = create_program_address(seeds, static_cast<std::uint8_t>(bump), ids::bpf_upgradeable_loader);
         INFO("bump " << bump);
-        if (expected.empty()) CHECK_FALSE(addr.has_value());
+        if (expected.empty())
+            CHECK_FALSE(addr.has_value());
         else {
             REQUIRE(addr.has_value());
-            CHECK(addr->base58() == expected);
+            CHECK(must(addr).base58() == expected);
         }
     }
     CHECK_THROWS_AS(find_program_address(std::vector<Bytes>(16, Bytes{1}), ids::system_program), std::invalid_argument);
@@ -837,7 +1118,8 @@ TEST_CASE("create_program_address rejects on-curve results", "[solana]") {
 
 TEST_CASE("associated token addresses for Token and Token-2022", "[solana]") {
     for (const auto& v : ata_vectors)
-        CHECK(associated_token_address(pubkey_const(v.owner), pubkey_const(v.mint), pubkey_const(v.token_program)).base58() == v.address);
+        CHECK(associated_token_address(pubkey_const(v.owner), pubkey_const(v.mint), pubkey_const(v.token_program))
+                  .base58() == v.address);
 }
 
 TEST_CASE("seed() keypairs are deterministic ed25519 keys", "[solana]") {
@@ -853,12 +1135,15 @@ TEST_CASE("seed() keypairs are deterministic ed25519 keys", "[solana]") {
 }
 
 TEST_CASE("legacy transactions serialize byte-for-byte like the SDK", "[solana]") {
-    Keypair alice = Keypair::from_name("alice"), bob = Keypair::from_name("bob"), carol = Keypair::from_name("carol");
-    Hash bh = sha256(as_bytes("blockhash"));
-    Instruction transfer{ids::token_program,
-                         {{bob.pubkey, false, true}, {carol.pubkey, false, true}, {alice.pubkey, true, false}},
-                         spl_transfer_data(250000)};
-    Instruction memo{ids::memo_program, {{carol.pubkey, true, false}}, Bytes(as_bytes("hello").begin(), as_bytes("hello").end())};
+    Keypair alice = Keypair::from_name("alice");
+    Keypair bob = Keypair::from_name("bob");
+    Keypair carol = Keypair::from_name("carol");
+    const Hash bh = sha256(as_bytes("blockhash"));
+    const Instruction transfer{ids::token_program,
+                               {{bob.pubkey, false, true}, {carol.pubkey, false, true}, {alice.pubkey, true, false}},
+                               spl_transfer_data(250000)};
+    const Instruction memo{
+        ids::memo_program, {{carol.pubkey, true, false}}, Bytes(as_bytes("hello").begin(), as_bytes("hello").end())};
     Bytes tx = build_transaction({transfer, memo}, alice.pubkey, bh, {carol, alice});
     CHECK(hex_encode(tx) == tx_vector_hex);
     CHECK_THROWS_AS(build_transaction({transfer, memo}, alice.pubkey, bh, {alice}), std::invalid_argument);
@@ -871,12 +1156,13 @@ TEST_CASE("SPL account layouts", "[solana]") {
     m.decimals = 6;
     Bytes mint = encode_mint(m);
     REQUIRE(mint.size() == mint_base_len);
-    auto dm = decode_mint(mint);
+    const auto dm = decode_mint(mint);
     REQUIRE(dm);
-    CHECK(dm->mint_authority == m.mint_authority);
-    CHECK_FALSE(dm->freeze_authority.has_value());
-    CHECK(dm->supply == 125'000'000);
-    CHECK(dm->decimals == 6);
+    const MintLayout& decoded_mint = must(dm);
+    CHECK(decoded_mint.mint_authority == m.mint_authority);
+    CHECK_FALSE(decoded_mint.freeze_authority.has_value());
+    CHECK(decoded_mint.supply == 125'000'000);
+    CHECK(decoded_mint.decimals == 6);
 
     TokenAccountLayout a;
     a.mint = Keypair::from_name("usd").pubkey;
@@ -885,11 +1171,12 @@ TEST_CASE("SPL account layouts", "[solana]") {
     a.state = TokenAccountState::frozen;
     Bytes acc = encode_token_account(a);
     REQUIRE(acc.size() == token_account_base_len);
-    auto da = decode_token_account(acc);
+    const auto da = decode_token_account(acc);
     REQUIRE(da);
-    CHECK(da->amount == 42);
-    CHECK(da->owner == a.owner);
-    CHECK(da->state == TokenAccountState::frozen);
+    const TokenAccountLayout& decoded_account = must(da);
+    CHECK(decoded_account.amount == 42);
+    CHECK(decoded_account.owner == a.owner);
+    CHECK(decoded_account.state == TokenAccountState::frozen);
 
     // Token-2022: base padded to 165 bytes, account type byte, then TLV.
     m.extensions.push_back({ExtensionType::mint_close_authority, Bytes(32, 7)});
@@ -898,7 +1185,7 @@ TEST_CASE("SPL account layouts", "[solana]") {
     CHECK(mint22[165] == 1);
     CHECK(mint22[166] == 3);
     CHECK(mint22[168] == 32);
-    CHECK(decode_mint(mint22)->supply == 125'000'000);
+    CHECK(must(decode_mint(mint22)).supply == 125'000'000);
 
     LookupTableLayout t;
     t.addresses = {a.mint, a.owner};
@@ -935,6 +1222,7 @@ TEST_CASE("borsh writer/reader and anchor discriminators", "[solana]") {
     CHECK(hex_encode(d) == hex_encode(ByteView(sha256(as_bytes("global:increment"))).subspan(0, 8)));
 }
 
+// clang-format off
 /* Vector generator. Regenerate with:
      pip install solders==0.29.0 && python gen.py > vectors.inc
    and paste vectors.inc into the anonymous namespace above.
@@ -954,9 +1242,9 @@ for i in range(400):
     b = hashlib.sha256(b"curve" + str(i).encode()).digest()
     curve.append((b.hex(), Pubkey(b).is_on_curve()))
 out.append("// {hex, on_curve} generated with solders %s" % "0.29.0")
-out.append("const std::vector<std::pair<std::string, bool>> curve_vectors = {")
+out.append("constexpr auto curve_vectors = std::to_array<std::pair<std::string_view, bool>>({")
 out += ['    {"%s", %s},' % (h, "true" if c else "false") for h, c in curve]
-out.append("};")
+out.append("});")
 
 programs = [Pubkey.from_string("11111111111111111111111111111111"),
             Pubkey.from_string("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"),
@@ -967,11 +1255,12 @@ for i in range(60):
     seeds = [b"tide", str(i).encode(), hashlib.sha256(str(i).encode()).digest()[: i % 33]]
     addr, bump = Pubkey.find_program_address(seeds, prog)
     pdas.append((str(prog), [s.hex() for s in seeds], str(addr), bump))
-out.append("struct PdaVector { std::string program; std::vector<std::string> seeds_hex; std::string address; int bump; };")
-out.append("const std::vector<PdaVector> pda_vectors = {")
+out.append("struct PdaVector { std::string_view program; std::array<std::string_view, 3> seeds_hex; "
+           "std::string_view address; int bump; };")
+out.append("constexpr auto pda_vectors = std::to_array<PdaVector>({")
 for p, s, a, b in pdas:
     out.append('    {"%s", {%s}, "%s", %d},' % (p, ", ".join('"%s"' % x for x in s), a, b))
-out.append("};")
+out.append("});")
 
 # create_program_address with explicit bumps, including on-curve failures
 cpa = []
@@ -984,9 +1273,9 @@ for bump in range(256):
         a = ""
     cpa.append((bump, a))
 out.append("// create_program_address([\"Talking\", \"Squirrels\", bump], BPFLoaderUpgradeab1e...); empty = on curve")
-out.append("const std::vector<std::pair<int, std::string>> cpa_vectors = {")
+out.append("constexpr auto cpa_vectors = std::to_array<std::pair<int, std::string_view>>({")
 out += ['    {%d, "%s"},' % (b, a) for b, a in cpa]
-out.append("};")
+out.append("});")
 
 ata_prog = Pubkey.from_string("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL")
 tok = programs[1]
@@ -998,29 +1287,31 @@ for i in range(20):
     tp = tok if i % 2 == 0 else tok22
     a, _ = Pubkey.find_program_address([bytes(owner), bytes(tp), bytes(mint)], ata_prog)
     atas.append((str(owner), str(mint), str(tp), str(a)))
-out.append("struct AtaVector { std::string owner, mint, token_program, address; };")
-out.append("const std::vector<AtaVector> ata_vectors = {")
+out.append("struct AtaVector { std::string_view owner, mint, token_program, address; };")
+out.append("constexpr auto ata_vectors = std::to_array<AtaVector>({")
 out += ['    {"%s", "%s", "%s", "%s"},' % t for t in atas]
-out.append("};")
+out.append("});")
 
 # seed("name") keypairs: ed25519 seed = sha256("tide:seed:" + name)
 names = ["alice", "bob", "admin", "usd", ""]
-out.append("const std::vector<std::pair<std::string, std::string>> seed_vectors = {")
+out.append("constexpr auto seed_vectors = std::to_array<std::pair<std::string_view, std::string_view>>({")
 for n in names:
     kp = Keypair.from_seed(hashlib.sha256(b"tide:seed:" + n.encode()).digest())
     out.append('    {"%s", "%s"},' % (n, str(kp.pubkey())))
-out.append("};")
+out.append("});")
 
 # Signed legacy transaction, byte-exact
 def kp(n): return Keypair.from_seed(hashlib.sha256(b"tide:seed:" + n.encode()).digest())
 alice, bob, carol = kp("alice"), kp("bob"), kp("carol")
 bh = Hash(hashlib.sha256(b"blockhash").digest())
 ix1 = Instruction(programs[1], bytes([3]) + (250000).to_bytes(8, "little"),
-                  [AccountMeta(bob.pubkey(), False, True), AccountMeta(carol.pubkey(), False, True), AccountMeta(alice.pubkey(), True, False)])
+                  [AccountMeta(bob.pubkey(), False, True), AccountMeta(carol.pubkey(), False, True),
+                   AccountMeta(alice.pubkey(), True, False)])
 memo = Pubkey.from_string("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr")
 ix2 = Instruction(memo, b"hello", [AccountMeta(carol.pubkey(), True, False)])
 msg = Message.new_with_blockhash([ix1, ix2], alice.pubkey(), bh)
 tx = Transaction([alice, carol], msg, bh)
-out.append('const std::string tx_vector_hex = "%s";' % bytes(tx).hex())
+out.append('constexpr std::string_view tx_vector_hex = "%s";' % bytes(tx).hex())
 print("\n".join(out))
 */
+// clang-format on

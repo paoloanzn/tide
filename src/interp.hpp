@@ -34,6 +34,8 @@ public:
     ~Interpreter();
     Interpreter(const Interpreter&) = delete;
     Interpreter& operator=(const Interpreter&) = delete;
+    Interpreter(Interpreter&&) = delete;
+    Interpreter& operator=(Interpreter&&) = delete;
 
     // Evaluates module-level bindings of every module, imports first.
     bool init_globals();

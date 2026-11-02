@@ -29,6 +29,10 @@ class SolanaTestValidatorBackend final : public NetworkBackend {
 public:
     SolanaTestValidatorBackend(SolanaBackendOptions options, Diagnostics& diags, std::ostream& log);
     ~SolanaTestValidatorBackend() override;
+    SolanaTestValidatorBackend(const SolanaTestValidatorBackend&) = delete;
+    SolanaTestValidatorBackend& operator=(const SolanaTestValidatorBackend&) = delete;
+    SolanaTestValidatorBackend(SolanaTestValidatorBackend&&) = delete;
+    SolanaTestValidatorBackend& operator=(SolanaTestValidatorBackend&&) = delete;
 
     void configure(const NetworkConfig& config) override;
     GenesisBuilder& genesis() override;

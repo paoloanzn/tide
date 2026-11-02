@@ -5,6 +5,7 @@
 // types and folded literal values; the interpreter only reads them.
 #pragma once
 
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -39,7 +40,7 @@ struct Ident {
 // ---------------------------------------------------------------- types --
 
 struct TypeExpr {
-    enum class Kind { named, list, array, tuple };
+    enum class Kind : std::uint8_t { named, list, array, tuple };
     Loc loc;
     Kind kind = Kind::named;
     std::string name;            // named
@@ -49,28 +50,71 @@ struct TypeExpr {
 
 // ---------------------------------------------------------- expressions --
 
-enum class Unit { none, sol, lamports, ms, s, slots };
+enum class Unit : std::uint8_t { none, sol, lamports, ms, s, slots };
 
-enum class BinaryOp { or_, and_, eq, ne, lt, le, gt, ge, range, range_incl, add, sub, mul, div, mod };
-enum class UnaryOp { not_, neg };
+enum class BinaryOp : std::uint8_t { or_, and_, eq, ne, lt, le, gt, ge, range, range_incl, add, sub, mul, div, mod };
+enum class UnaryOp : std::uint8_t { not_, neg };
 
 // Identifies a standard-library function; resolved by sema, executed by the
 // interpreter (see sema.cpp `builtin_table` and interp.cpp `call_builtin`).
-enum class BuiltinId {
+enum class BuiltinId : std::uint8_t {
     none,
     // keys & addresses
-    seed, keypair_file, pubkey, pda, pda_bump, ata,
-    system_program, token_program, token_2022_program, associated_token_program,
-    bpf_loader, bpf_loader_deprecated, bpf_upgradeable_loader, loader_v4,
-    memo_program, compute_budget_program, address_lookup_table_program,
+    seed,
+    keypair_file,
+    pubkey,
+    pda,
+    pda_bump,
+    ata,
+    system_program,
+    token_program,
+    token_2022_program,
+    associated_token_program,
+    bpf_loader,
+    bpf_loader_deprecated,
+    bpf_upgradeable_loader,
+    loader_v4,
+    memo_program,
+    compute_budget_program,
+    address_lookup_table_program,
     // bytes & encodings
-    hex, base64, base58, utf8, sha256, file, u8, u16_le, u32_le, u64_le, i64_le, borsh, anchor, decode,
+    hex,
+    base64,
+    base58,
+    utf8,
+    sha256,
+    file,
+    u8,
+    u16_le,
+    u32_le,
+    u64_le,
+    i64_le,
+    borsh,
+    anchor,
+    decode,
     // misc
-    len, str, print, rent_exempt, rpc, readonly, writable, signer, sol,
+    len,
+    str,
+    print,
+    rent_exempt,
+    rpc,
+    readonly,
+    writable,
+    signer,
+    sol,
     // instruction data helpers
-    system_transfer, spl_transfer, spl_transfer_checked, spl_mint_to, memo,
+    system_transfer,
+    spl_transfer,
+    spl_transfer_checked,
+    spl_mint_to,
+    memo,
     // state queries
-    balance, token_balance, account, exists, slot, epoch,
+    balance,
+    token_balance,
+    account,
+    exists,
+    slot,
+    epoch,
 };
 
 struct NumberLit {
@@ -80,23 +124,31 @@ struct NumberLit {
     Loc unit_loc;
     // sema: folded value. A float with a lamport unit folds to an integer.
     bool folded_int = true;
-    __int128 int_value = 0;
+    i128 int_value = 0;
     double float_value = 0;
 };
-struct StringLit { std::string value; };
-struct BoolLit { bool value; };
+struct StringLit {
+    std::string value;
+};
+struct BoolLit {
+    bool value;
+};
 struct NullLit {};
 struct IdentExpr {
     std::string name;
     const sema::Symbol* sym = nullptr;  // sema
 };
-struct ListLit { std::vector<ExprPtr> elems; };
+struct ListLit {
+    std::vector<ExprPtr> elems;
+};
 struct ObjectField {
     Loc loc;
     std::string key;
     ExprPtr value;
 };
-struct ObjectLit { std::vector<ObjectField> fields; };
+struct ObjectLit {
+    std::vector<ObjectField> fields;
+};
 struct UnaryExpr {
     UnaryOp op;
     ExprPtr operand;
@@ -117,8 +169,8 @@ struct IndexExpr {
 struct CallExpr {
     ExprPtr callee;
     std::vector<ExprPtr> args;
-    BuiltinId builtin = BuiltinId::none;       // sema
-    const sema::Symbol* function = nullptr;    // sema: user function
+    BuiltinId builtin = BuiltinId::none;     // sema
+    const sema::Symbol* function = nullptr;  // sema: user function
 };
 
 struct Expr {
@@ -129,9 +181,13 @@ struct Expr {
     const sema::Type* type = nullptr;  // sema
 
     template <typename T>
-    T* as() { return std::get_if<T>(&node); }
+    T* as() {
+        return std::get_if<T>(&node);
+    }
     template <typename T>
-    const T* as() const { return std::get_if<T>(&node); }
+    [[nodiscard]] const T* as() const {
+        return std::get_if<T>(&node);
+    }
 };
 
 // --------------------------------------------------------------- records --
@@ -140,7 +196,7 @@ struct RecordBlock;
 
 // `key = value;`, `key { ... }` or `extension name { ... }`.
 struct RecordEntry {
-    enum class Kind { value, nested, extension };
+    enum class Kind : std::uint8_t { value, nested, extension };
     Loc loc;
     Kind kind = Kind::value;
     std::string key;
@@ -155,7 +211,7 @@ struct RecordBlock {
 
 // ------------------------------------------------------------ statements --
 
-enum class BindingKind { let, source, keypair };
+enum class BindingKind : std::uint8_t { let, source, keypair };
 
 struct LetStmt {
     BindingKind kind = BindingKind::let;
@@ -165,7 +221,7 @@ struct LetStmt {
     sema::Symbol* sym = nullptr;  // sema
 };
 
-enum class AssignOp { set, add, sub, mul, div, mod };
+enum class AssignOp : std::uint8_t { set, add, sub, mul, div, mod };
 
 // Arithmetic operator behind a compound assignment (`+=` is add). Plain `=`
 // has none.
@@ -205,13 +261,17 @@ struct AssertStmt {
     ExprPtr cond;
     std::optional<std::string> message;
 };
-struct ExprStmt { ExprPtr expr; };
+struct ExprStmt {
+    ExprPtr expr;
+};
 struct BreakStmt {};
 struct ContinueStmt {};
-struct ReturnStmt { ExprPtr value; };
+struct ReturnStmt {
+    ExprPtr value;
+};
 
 // Genesis state declarations whose body is a field list.
-enum class EntityKind { account, program, mint, token_account, associated_token_account, lookup_table };
+enum class EntityKind : std::uint8_t { account, program, mint, token_account, associated_token_account, lookup_table };
 struct EntityDecl {
     EntityKind kind;
     Ident label;     // program name (program only)
@@ -244,9 +304,9 @@ struct DeleteDecl {
 struct TxEntry {
     Loc loc;
     bool is_instruction = false;
-    std::string key;     // key = value
+    std::string key;  // key = value
     ExprPtr value;
-    ExprPtr program;     // instruction <program> { ... }
+    ExprPtr program;  // instruction <program> { ... }
     RecordBlock body;
 };
 struct TransactionStmt {
@@ -258,16 +318,26 @@ struct InvokeStmt {
     ExprPtr program;
     RecordBlock with;
 };
-struct DeployStmt { ExprPtr program, from; };
-struct AirdropStmt { ExprPtr to, amount; };
-enum class WarpKind { to_slot, to_epoch, to_time, by_slots };
+struct DeployStmt {
+    ExprPtr program, from;
+};
+struct AirdropStmt {
+    ExprPtr to, amount;
+};
+enum class WarpKind : std::uint8_t { to_slot, to_epoch, to_time, by_slots };
 struct WarpStmt {
     WarpKind kind;
     ExprPtr value;
 };
-struct SnapshotStmt { ExprPtr name; };
-struct RestoreStmt { ExprPtr name; };
-struct AwaitStmt { ExprPtr cond; };
+struct SnapshotStmt {
+    ExprPtr name;
+};
+struct RestoreStmt {
+    ExprPtr name;
+};
+struct AwaitStmt {
+    ExprPtr cond;
+};
 
 struct Stmt {
     Loc loc;
@@ -277,9 +347,13 @@ struct Stmt {
         node;
 
     template <typename T>
-    T* as() { return std::get_if<T>(&node); }
+    T* as() {
+        return std::get_if<T>(&node);
+    }
     template <typename T>
-    const T* as() const { return std::get_if<T>(&node); }
+    [[nodiscard]] const T* as() const {
+        return std::get_if<T>(&node);
+    }
 };
 
 // ---------------------------------------------------------- declarations --
@@ -316,13 +390,19 @@ struct FunctionDecl {
     sema::Symbol* sym = nullptr;  // sema
 };
 
-struct OptionsEntry { RecordBlock body; };
+struct OptionsEntry {
+    RecordBlock body;
+};
 struct ValidatorEntry {
     Ident name;
     RecordBlock body;
 };
-struct GenesisEntry { Block body; };
-struct BootstrapEntry { Block body; };
+struct GenesisEntry {
+    Block body;
+};
+struct BootstrapEntry {
+    Block body;
+};
 struct ScenarioEntry {
     Ident name;
     Block body;

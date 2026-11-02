@@ -10,9 +10,10 @@ This page is for people who want to build Tide from source, find their way aroun
 | --- | --- |
 | CMake >= 3.25 | `cmake_minimum_required(VERSION 3.25)`; the presets file uses schema version 6. |
 | Ninja | Both presets use the `Ninja` generator. |
-| C++20 compiler | `CMAKE_CXX_STANDARD 20`, extensions off. The code uses `__int128`, so GCC or Clang is required (GCC 13 is known to work). |
+| C++20 compiler | `CMAKE_CXX_STANDARD 20`, extensions off. Tide's `int` is a 128-bit integer (`tide::i128`, an alias of the `__int128` extension), so GCC or Clang is required (GCC 13 is known to work). |
 | vcpkg | Dependencies come from `vcpkg.json` in manifest mode. `VCPKG_ROOT` must point at your vcpkg checkout; the presets load `$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake`. |
 | POSIX system | The test-validator backend uses `posix_spawn`, signals and sockets. Development happens on Linux. |
+| clang-format, clang-tidy, clangd 18 | Optional for building; required for the `lint` preset and for keeping changes formatted and lint-clean (see [code style and linting](#code-style-and-linting)). |
 
 Dependencies declared in `vcpkg.json`:
 
@@ -29,14 +30,15 @@ The vcpkg baseline is pinned with `builtin-baseline` in `vcpkg.json`. Installed 
 
 ### Presets
 
-`CMakePresets.json` defines two configure presets and matching build presets:
+`CMakePresets.json` defines three configure presets and matching build presets:
 
 | Preset | Build type | Binary dir |
 | --- | --- | --- |
 | `default` | Debug | `build/debug` |
 | `release` | Release | `build/release` |
+| `lint` | Debug, with clang-tidy on every source and all warnings as errors | `build/lint` |
 
-Both set `VCPKG_FORCE_SYSTEM_BINARIES=1`, so vcpkg uses the CMake and Ninja found on your `PATH` instead of downloading its own. There is one test preset, `default`, bound to the Debug build, with output shown on failure.
+All of them set `VCPKG_FORCE_SYSTEM_BINARIES=1`, so vcpkg uses the CMake and Ninja found on your `PATH` instead of downloading its own. There is one test preset, `default`, bound to the Debug build, with output shown on failure.
 
 ### Building
 
@@ -88,6 +90,42 @@ It needs:
 - the ports used by `tests/examples/07_e2e_tokens.tid` to be free: RPC 18899, faucet 19900, gossip 18001 and the dynamic range 18002-18040. They are deliberately not the defaults, so a validator you already run on 8899 does not collide.
 
 The test writes its state under the system temp directory (`tide_e2e_state`), checks `getHealth` on the launched network, then stops it with `stop_network` and deletes the state.
+
+### Code style and linting
+
+The repository carries three configuration files at its root. A change is expected to leave all of them clean.
+
+| File | Tool | What it enforces |
+| --- | --- | --- |
+| `.clang-format` | clang-format 18 | Google style adapted to the code: 4-space indent, 120 columns, leading `const`, includes grouped as own header, third-party, POSIX, standard library, project. |
+| `.clang-tidy` | clang-tidy 18 | A strict profile: every `bugprone`, `cert`, `clang-analyzer`, `concurrency`, `cppcoreguidelines`, `google`, `misc`, `modernize`, `performance`, `portability` and `readability` check, a cognitive-complexity limit of 25 per function, include hygiene (`misc-include-cleaner`) and naming rules (snake_case functions and variables, CamelCase types, private members ending in `_`). The few disabled checks are listed with their reason at the top of the file. |
+| `.clangd` | clangd 18 | Points clangd at `build/debug/compile_commands.json`, shows the clang-tidy findings and strict include diagnostics in the editor, and enables background indexing and inlay hints. |
+
+Compiler warnings are set in `CMakeLists.txt` (`TIDE_WARNINGS`) for every target, tests included: `-Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wsign-conversion -Wold-style-cast` and more, plus GCC-only checks such as `-Wduplicated-branches` and `-Wuseless-cast`. Two options turn them into a gate:
+
+| Option | Default | Effect |
+| --- | --- | --- |
+| `TIDE_WERROR` | `OFF` | Compiler warnings, and clang-tidy findings when `TIDE_CLANG_TIDY` is on, become errors. |
+| `TIDE_CLANG_TIDY` | `OFF` | Runs clang-tidy with `.clang-tidy` on each source as it compiles. |
+
+The `lint` preset enables both:
+
+```sh
+cmake --preset lint
+cmake --build --preset lint        # fails on any warning or clang-tidy finding
+```
+
+Some `-Wnull-dereference` diagnostics only appear with optimisation, so build the `release` preset too before sending a change.
+
+To format, or to lint without a full build:
+
+```sh
+clang-format -i src/*.cpp src/*.hpp tests/*.cpp
+clang-format --dry-run -Werror src/*.cpp src/*.hpp tests/*.cpp   # check only
+run-clang-tidy -p build/debug 'tide/(src|tests)/'
+```
+
+A finding is fixed rather than suppressed. Where a fix is impossible or clearly worse (a POSIX API that takes `sockaddr*`, state shared with a signal handler, `getenv`), the line carries `NOLINT(<check>)` or `NOLINTNEXTLINE(<check>)` naming the check, followed by the reason. Two regions in `src/parser.cpp` are exempt as a whole, and say why: the keyword X-macros, and the lexy grammar productions, which stay snake_case so they do not clash with the AST types they build (the production `stmt` builds an `ast::Stmt`).
 
 ## Code layout
 
@@ -239,8 +277,8 @@ The **field-handler consistency test** ("every checker-accepted field has an int
 ### Add a builtin
 
 1. `src/ast.hpp`: add an enumerator to `BuiltinId`.
-2. `src/sema.cpp`: add a row to `builtin_table` (Tide name, id, `Effect`), then a `case` in `check_builtin` that checks arity and argument types and returns the result type.
-3. `src/interp.cpp`: add a `case` in `call_builtin`. If it needs network state, read through the active `RuntimeClient` or `GenesisBuilder`, never a concrete backend.
+2. `src/sema.cpp`: add a row to `builtin_table` (Tide name, id, `Effect`), then a `case` in `check_builtin` that checks arity and argument types and returns the result type. A check longer than a line or two goes into a `check_<name>` helper next to `check_builtin`, which keeps the function under the complexity limit.
+3. `src/interp.cpp`: add a `case` in `call_builtin`, again delegating anything non-trivial to a `builtin_<name>` helper next to it. If it needs network state, read through the active `RuntimeClient` or `GenesisBuilder`, never a concrete backend.
 4. If it needs new Solana logic (an encoding, a layout, a derivation), put it in `src/solana.{hpp,cpp}` and test it in `tests/solana_test.cpp` against SDK-generated vectors.
 5. Tests: checker errors in `frontend_test.cpp`, behaviour in `interp_test.cpp`.
 6. Document it in the [standard library reference](../reference/standard-library.md).

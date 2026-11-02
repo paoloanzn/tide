@@ -84,7 +84,7 @@ struct ProgramSpec {
     Loc origin;
 };
 
-using SysvarValue = std::variant<__int128, double, bool>;
+using SysvarValue = std::variant<i128, double, bool>;
 struct SysvarSpec {
     std::string name;
     std::map<std::string, SysvarValue> fields;
@@ -138,7 +138,13 @@ struct AccountView {
 // Privileged, pre-launch state construction.
 class GenesisBuilder {
 public:
+    GenesisBuilder() = default;
     virtual ~GenesisBuilder() = default;
+    // Used through references only; copying would slice.
+    GenesisBuilder(const GenesisBuilder&) = delete;
+    GenesisBuilder& operator=(const GenesisBuilder&) = delete;
+    GenesisBuilder(GenesisBuilder&&) = delete;
+    GenesisBuilder& operator=(GenesisBuilder&&) = delete;
     virtual void put_account(const AccountSpec& spec) = 0;
     virtual void put_program(const ProgramSpec& spec) = 0;
     virtual void clone_account(const CloneSpec& spec) = 0;
@@ -147,7 +153,7 @@ public:
     virtual void set_sysvar(const SysvarSpec& spec) = 0;
     virtual void fork(const ForkSpec& spec) = 0;
     // The planned genesis state, for queries made while building it.
-    virtual std::optional<AccountView> account(const Pubkey& address) const = 0;
+    [[nodiscard]] virtual std::optional<AccountView> account(const Pubkey& address) const = 0;
 };
 
 // ------------------------------------------------------------------ runtime --
@@ -178,7 +184,13 @@ struct DeployRequest {
 // Normal, authorized interaction with a running network.
 class RuntimeClient {
 public:
+    RuntimeClient() = default;
     virtual ~RuntimeClient() = default;
+    // Used through references only; copying would slice.
+    RuntimeClient(const RuntimeClient&) = delete;
+    RuntimeClient& operator=(const RuntimeClient&) = delete;
+    RuntimeClient(RuntimeClient&&) = delete;
+    RuntimeClient& operator=(RuntimeClient&&) = delete;
     virtual TxResult send_transaction(const TransactionRequest& request) = 0;
     virtual TxResult airdrop(const Pubkey& to, std::uint64_t lamports, Loc origin) = 0;
     virtual TxResult deploy(const DeployRequest& request) = 0;
@@ -197,7 +209,13 @@ struct LaunchInfo {
 
 class NetworkBackend {
 public:
+    NetworkBackend() = default;
     virtual ~NetworkBackend() = default;
+    // Used through references only; copying would slice.
+    NetworkBackend(const NetworkBackend&) = delete;
+    NetworkBackend& operator=(const NetworkBackend&) = delete;
+    NetworkBackend(NetworkBackend&&) = delete;
+    NetworkBackend& operator=(NetworkBackend&&) = delete;
     virtual void configure(const NetworkConfig& config) = 0;
     virtual GenesisBuilder& genesis() = 0;
     virtual RuntimeClient& start_bootstrap() = 0;

@@ -1,20 +1,74 @@
 // Interpreter tests against an in-memory backend: lifecycle ordering, genesis
 // construction and validation, runtime requests, and language semantics.
+#include "interp.hpp"
+
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <filesystem>
 #include <fstream>
 #include <functional>
+#include <map>
+#include <memory>
+#include <optional>
 #include <sstream>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
 
-#include "interp.hpp"
+#include "ast.hpp"
+#include "diag.hpp"
 #include "parser.hpp"
 #include "sema.hpp"
+#include "solana.hpp"
+#include "state_builder.hpp"
 
-using namespace tide;
-using namespace tide::backend;
+namespace ast = tide::ast;
 namespace fs = std::filesystem;
+namespace sema = tide::sema;
+namespace sol = tide::sol;
+using tide::Diagnostics;
+using tide::i128;
+using tide::Interpreter;
+using tide::Loc;
+using tide::parse_document;
+using tide::RunOptions;
+using tide::RunResult;
+using tide::Severity;
+using tide::SourceFile;
+using tide::SourceManager;
+using tide::backend::AccountSpec;
+using tide::backend::AccountView;
+using tide::backend::CloneSpec;
+using tide::backend::DeleteSpec;
+using tide::backend::DeployRequest;
+using tide::backend::FeatureSpec;
+using tide::backend::ForkSpec;
+using tide::backend::GenesisBuilder;
+using tide::backend::LaunchInfo;
+using tide::backend::NetworkBackend;
+using tide::backend::NetworkConfig;
+using tide::backend::ProgramSpec;
+using tide::backend::RuntimeClient;
+using tide::backend::SysvarSpec;
+using tide::backend::TransactionRequest;
+using tide::backend::TxResult;
+using tide::sol::Pubkey;
 
 namespace {
+
+// clang-tidy's optional-access analysis cannot see that a preceding REQUIRE aborts the test, so values the test has
+// already required are unwrapped through this explicit check (an empty optional fails the test with this message).
+// Taking an lvalue keeps the returned reference from outliving a temporary optional.
+template <class Optional>
+decltype(auto) must(Optional& opt) {
+    if (!opt) throw std::logic_error("expected a value, got an empty optional");
+    return *opt;
+}
 
 // Records every call crossing the backend boundary.
 struct FakeBackend final : NetworkBackend, GenesisBuilder, RuntimeClient {
@@ -33,23 +87,23 @@ struct FakeBackend final : NetworkBackend, GenesisBuilder, RuntimeClient {
 
     void configure(const NetworkConfig& c) override {
         config = c;
-        events.push_back("configure");
+        events.emplace_back("configure");
     }
     GenesisBuilder& genesis() override { return *this; }
     RuntimeClient& start_bootstrap() override {
-        events.push_back("start_bootstrap");
+        events.emplace_back("start_bootstrap");
         return *this;
     }
-    void persist() override { events.push_back("persist"); }
+    void persist() override { events.emplace_back("persist"); }
     RuntimeClient& launch() override {
-        events.push_back("launch");
+        events.emplace_back("launch");
         return *this;
     }
     LaunchInfo detach() override {
-        events.push_back("detach");
+        events.emplace_back("detach");
         return {"http://fake", "/fake", 1};
     }
-    void abort() noexcept override { events.push_back("abort"); }
+    void abort() noexcept override { events.emplace_back("abort"); }
 
     void put_account(const AccountSpec& s) override {
         accounts[s.address] = {s.address, s.lamports, s.owner, s.data, s.executable, s.rent_epoch};
@@ -62,8 +116,8 @@ struct FakeBackend final : NetworkBackend, GenesisBuilder, RuntimeClient {
     void remove_account(const DeleteSpec& s) override { accounts.erase(s.address); }
     void set_feature(const FeatureSpec& s) override { features.push_back(s); }
     void set_sysvar(const SysvarSpec& s) override { sysvars.push_back(s); }
-    void fork(const ForkSpec&) override { events.push_back("fork"); }
-    std::optional<AccountView> account(const Pubkey& a) const override {
+    void fork(const ForkSpec& /*spec*/) override { events.emplace_back("fork"); }
+    [[nodiscard]] std::optional<AccountView> account(const Pubkey& a) const override {
         auto it = accounts.find(a);
         if (it == accounts.end()) return std::nullopt;
         return it->second;
@@ -71,17 +125,17 @@ struct FakeBackend final : NetworkBackend, GenesisBuilder, RuntimeClient {
 
     TxResult send_transaction(const TransactionRequest& r) override {
         txs.push_back(r);
-        events.push_back("tx");
+        events.emplace_back("tx");
         return on_tx(r);
     }
-    TxResult airdrop(const Pubkey& to, std::uint64_t lamports, Loc) override {
-        events.push_back("airdrop");
+    TxResult airdrop(const Pubkey& to, std::uint64_t lamports, Loc /*origin*/) override {
+        events.emplace_back("airdrop");
         auto& a = accounts[to];
         a.address = to;
         a.lamports += lamports;
         return TxResult{.success = true, .signature = "airdrop-sig", .slot = 1};
     }
-    TxResult deploy(const DeployRequest&) override { return TxResult{.success = true}; }
+    TxResult deploy(const DeployRequest& /*request*/) override { return TxResult{.success = true}; }
     std::optional<AccountView> account(const Pubkey& a) override { return std::as_const(*this).account(a); }
     std::uint64_t slot() override { return current_slot++; }
     std::uint64_t epoch() override { return 0; }
@@ -97,9 +151,8 @@ struct Run {
     RunResult result;
 
     bool has(std::string_view text, Severity sev = Severity::error) const {
-        for (const auto& d : diags.all())
-            if (d.severity == sev && d.message.find(text) != std::string::npos) return true;
-        return false;
+        return std::ranges::any_of(
+            diags.all(), [&](const auto& d) { return d.severity == sev && d.message.find(text) != std::string::npos; });
     }
     std::string dump() const {
         std::string s;
@@ -108,13 +161,13 @@ struct Run {
     }
 };
 
-std::unique_ptr<Run> run(const std::string& src, RunOptions opts = {}, fs::path path = "test.tid",
-                         std::function<void(FakeBackend&)> setup = {}) {
+std::unique_ptr<Run> run(const std::string& src, const RunOptions& opts = {}, fs::path path = "test.tid",
+                         const std::function<void(FakeBackend&)>& setup = {}) {
     auto r = std::make_unique<Run>();
     const SourceFile* f = r->sm.add(std::move(path), src);
     r->doc = parse_document(*f, r->diags);
     REQUIRE(r->doc);
-    r->prog = sema::analyze(*r->doc, r->sm, r->diags);
+    r->prog = sema::analyze(must(r->doc), r->sm, r->diags);
     INFO(r->dump());
     REQUIRE(r->prog);
     if (setup) setup(r->backend);
@@ -131,9 +184,9 @@ std::string eval_print(const std::string& decls, const std::string& body) {
     auto r = run(decls + "\nnetwork n { genesis {\n" + body + "\n} }");
     INFO(r->dump());
     CHECK(r->result.ok);
-    std::string text = r->out.str();
-    std::size_t begin = text.find("==> building genesis state\n") + 27;
-    std::size_t end = text.rfind('\n', text.find("genesis account(s) defined"));
+    const std::string text = r->out.str();
+    const std::size_t begin = text.find("==> building genesis state\n") + 27;
+    const std::size_t end = text.rfind('\n', text.find("genesis account(s) defined"));
     return text.substr(begin, end + 1 - begin);
 }
 
@@ -166,7 +219,7 @@ TEST_CASE("lifecycle runs in order and detaches", "[interp]") {
     REQUIRE(r->result.ok);
     CHECK(r->backend.events ==
           std::vector<std::string>{"configure", "start_bootstrap", "airdrop", "persist", "launch", "detach"});
-    CHECK(r->backend.config.slots_per_epoch == 32u);
+    CHECK(r->backend.config.slots_per_epoch == 32U);
     CHECK(r->backend.config.startup_timeout_ms == 2000);
     REQUIRE(r->backend.config.validators.size() == 1);
     CHECK(r->backend.config.validators[0].rpc_port == 9000);
@@ -178,7 +231,9 @@ TEST_CASE("lifecycle runs in order and detaches", "[interp]") {
 TEST_CASE("dry run stops after persisting genesis", "[interp]") {
     RunOptions opts;
     opts.dry_run = true;
-    auto r = run("network n { genesis { account seed(\"x\").pubkey { lamports = 5; } } bootstrap { airdrop seed(\"x\").pubkey amount 1; } }", opts);
+    auto r = run(
+        R"(network n { genesis { account seed("x").pubkey { lamports = 5; } } bootstrap { airdrop seed("x").pubkey amount 1; } })",
+        opts);
     REQUIRE(r->result.ok);
     CHECK(r->backend.events == std::vector<std::string>{"configure", "persist"});
     CHECK(r->backend.accounts.size() == 1);
@@ -204,9 +259,12 @@ TEST_CASE("bootstrap failures abort the lifecycle", "[interp]") {
             transaction { signers = [a]; instruction system_program() { accounts = [a.pubkey]; data = system_transfer(1); } }
           }
         }
-    )", {}, "test.tid", [](FakeBackend& b) {
-        b.on_tx = [](const TransactionRequest&) { return TxResult{.signature = "s", .error = "InstructionError", .logs = {"Program log: boom"}}; };
-    });
+    )",
+                 {}, "test.tid", [](FakeBackend& b) {
+                     b.on_tx = [](const TransactionRequest&) {
+                         return TxResult{.signature = "s", .error = "InstructionError", .logs = {"Program log: boom"}};
+                     };
+                 });
     CHECK_FALSE(r->result.ok);
     CHECK(r->has("transaction failed: InstructionError"));
     CHECK(r->has("Program log: boom"));
@@ -216,7 +274,7 @@ TEST_CASE("bootstrap failures abort the lifecycle", "[interp]") {
 // --------------------------------------------------------------- genesis --
 
 TEST_CASE("genesis builds SPL state from the design example", "[interp]") {
-    std::ifstream in(fs::path(TIDE_EXAMPLES_DIR) / "03_spl_mint.tid");
+    const std::ifstream in(fs::path(TIDE_EXAMPLES_DIR) / "03_spl_mint.tid");
     std::stringstream ss;
     ss << in.rdbuf();
     auto r = run(ss.str());
@@ -227,52 +285,66 @@ TEST_CASE("genesis builds SPL state from the design example", "[interp]") {
     const auto& mint = r->backend.accounts.at(pk("asset"));
     CHECK(mint.owner == sol::ids::token_program);
     CHECK(mint.lamports == sol::rent_exempt_minimum(82));
-    auto m = sol::decode_mint(mint.data);
-    REQUIRE(m);
-    CHECK(m->decimals == 6);
-    CHECK(m->supply == 125'000'000);
-    CHECK(m->mint_authority == pk("issuer"));
-    CHECK_FALSE(m->freeze_authority);
-    Pubkey ata = sol::associated_token_address(pk("holder"), pk("asset"), sol::ids::token_program);
-    auto t = sol::decode_token_account(r->backend.accounts.at(ata).data);
-    REQUIRE(t);
-    CHECK(t->owner == pk("holder"));
-    CHECK(t->amount == 125'000'000);
+    const auto decoded_mint = sol::decode_mint(mint.data);
+    REQUIRE(decoded_mint);
+    const sol::MintLayout& m = must(decoded_mint);
+    CHECK(m.decimals == 6);
+    CHECK(m.supply == 125'000'000);
+    CHECK(m.mint_authority == pk("issuer"));
+    CHECK_FALSE(m.freeze_authority);
+    const Pubkey ata = sol::associated_token_address(pk("holder"), pk("asset"), sol::ids::token_program);
+    const auto decoded_account = sol::decode_token_account(r->backend.accounts.at(ata).data);
+    REQUIRE(decoded_account);
+    const sol::TokenAccountLayout& t = must(decoded_account);
+    CHECK(t.owner == pk("holder"));
+    CHECK(t.amount == 125'000'000);
 }
 
 TEST_CASE("genesis cross-declaration validation", "[interp]") {
-    std::string pre = "keypair a = seed(\"a\");\nkeypair m = seed(\"m\");\n";
-    auto dup = run(pre + "network n { genesis {\n account a.pubkey { lamports = 1 SOL; }\n account a.pubkey { lamports = 2 SOL; }\n} }");
+    const std::string pre = "keypair a = seed(\"a\");\nkeypair m = seed(\"m\");\n";
+    auto dup = run(
+        pre +
+        "network n { genesis {\n account a.pubkey { lamports = 1 SOL; }\n account a.pubkey { lamports = 2 SOL; }\n} }");
     CHECK_FALSE(dup->result.ok);
     REQUIRE(dup->has("is already defined in genesis (as account)"));
     CHECK(dup->diags.all().front().notes.size() == 1);
 
-    auto wrong_ata = run(pre + "network n { genesis { associated_token_account a.pubkey { mint = m.pubkey; owner = a.pubkey; } } }");
+    auto wrong_ata =
+        run(pre + "network n { genesis { associated_token_account a.pubkey { mint = m.pubkey; owner = a.pubkey; } } }");
     CHECK(wrong_ata->has("is not the associated token account of owner"));
 
-    auto supply = run(pre + "network n { genesis { mint m.pubkey { decimals = 0; supply = 10; }\n"
-                            "  associated_token_account ata(a.pubkey, m.pubkey) { mint = m.pubkey; owner = a.pubkey; amount = 3; } } }");
+    auto supply = run(
+        pre +
+        "network n { genesis { mint m.pubkey { decimals = 0; supply = 10; }\n"
+        "  associated_token_account ata(a.pubkey, m.pubkey) { mint = m.pubkey; owner = a.pubkey; amount = 3; } } }");
     CHECK(supply->result.ok);
     CHECK(supply->has("has supply 10 but its token accounts in genesis hold 3", Severity::warning));
 
-    auto program_mismatch = run(pre + "network n { genesis { mint m.pubkey { decimals = 0; token_program = token_2022_program(); }\n"
-                                      "  token_account a.pubkey { mint = m.pubkey; owner = a.pubkey; } } }");
+    auto program_mismatch =
+        run(pre +
+            "network n { genesis { mint m.pubkey { decimals = 0; token_program = token_2022_program(); }\n"
+            "  token_account a.pubkey { mint = m.pubkey; owner = a.pubkey; } } }");
     CHECK(program_mismatch->has("uses a different token program than its mint"));
 
     auto ext = run(pre + "network n { genesis { mint m.pubkey { decimals = 0; extension non_transferable {} } } }");
     CHECK(ext->has("requires token_program = token_2022_program()"));
 
-    auto delegated = run(pre + "network n { genesis { token_account a.pubkey { mint = m.pubkey; owner = a.pubkey; amount = 1; "
-                               "delegate = m.pubkey; delegated_amount = 2; } } }");
+    auto delegated =
+        run(pre +
+            "network n { genesis { token_account a.pubkey { mint = m.pubkey; owner = a.pubkey; amount = 1; "
+            "delegate = m.pubkey; delegated_amount = 2; } } }");
     CHECK(delegated->has("exceeds the account amount"));
 
-    auto missing_bin = run(pre + "network n { genesis { program p { id = m.pubkey; binary = \"/nonexistent/p.so\"; } } }");
+    auto missing_bin =
+        run(pre + "network n { genesis { program p { id = m.pubkey; binary = \"/nonexistent/p.so\"; } } }");
     CHECK(missing_bin->has("does not exist"));
 
     auto rent = run(pre + "network n { genesis { account a.pubkey { lamports = 10; data = hex(\"00\"); } } }");
     CHECK(rent->has("below the rent-exempt minimum", Severity::warning));
 
-    auto del = run(pre + "network n { genesis { account a.pubkey { lamports = 1 SOL; } delete account a.pubkey; delete account m.pubkey; } }");
+    auto del = run(pre +
+                   "network n { genesis { account a.pubkey { lamports = 1 SOL; } delete account a.pubkey; delete "
+                   "account m.pubkey; } }");
     CHECK(del->has("cannot delete"));
     CHECK(del->backend.accounts.empty());
 }
@@ -312,23 +384,23 @@ TEST_CASE("lookup tables, sysvars, features and clones reach the backend", "[int
     CHECK(lut.owner == sol::ids::address_lookup_table_program);
     CHECK(lut.data.size() == 56 + 64);
     REQUIRE(r->backend.sysvars.size() == 1);
-    CHECK(std::get<__int128>(r->backend.sysvars[0].fields.at("slot")) == 100);
+    CHECK(std::get<i128>(r->backend.sysvars[0].fields.at("slot")) == 100);
     REQUIRE(r->backend.features.size() == 1);
     CHECK_FALSE(r->backend.features[0].enabled);
     REQUIRE(r->backend.clones.size() == 1);
     CHECK(r->backend.clones[0].url == "devnet");
-    CHECK(r->backend.clones[0].slot == 5u);
-    CHECK(r->backend.clones[0].overrides.lamports == 9u);
+    CHECK(r->backend.clones[0].slot == 5U);
+    CHECK(r->backend.clones[0].overrides.lamports == 9U);
 }
 
 // Uses every key the checker accepts in every record-like block. Any key that
 // passes sema without an interpreter handler fails here as an internal error
 // instead of being silently dropped.
 TEST_CASE("every checker-accepted field has an interpreter handler", "[interp]") {
-    fs::path dir = temp_dir("tide_all_fields_test");
+    const fs::path dir = temp_dir("tide_all_fields_test");
     std::ofstream(dir / "p.so") << "elf";
     std::ofstream(dir / "p.json") << R"({"instructions": [{"name": "go", "accounts": [], "args": []}]})";
-    std::string src = R"(
+    const std::string src = R"(
         keypair a = seed("a");
         keypair p = seed("p");
         let m = seed("mint").pubkey;
@@ -367,14 +439,14 @@ TEST_CASE("every checker-accepted field has an interpreter handler", "[interp]")
     INFO(r->dump());
     REQUIRE(r->result.ok);
     const NetworkConfig& c = r->backend.config;
-    CHECK(c.slots_per_epoch == 64u);
+    CHECK(c.slots_per_epoch == 64U);
     CHECK(c.confirm_timeout_ms == 2000);
     CHECK(c.faucet_sol == 1.5);
     REQUIRE(c.validators.size() == 1);
     CHECK(c.validators[0].dynamic_port_range == "4000-4100");
     CHECK(c.validators[0].identity.has_value());
     REQUIRE(r->backend.txs.size() == 2);
-    CHECK(r->backend.txs[0].compute_unit_price == 1u);
+    CHECK(r->backend.txs[0].compute_unit_price == 1U);
     CHECK(r->backend.txs[1].instructions[0].accounts.size() == 1);  // remaining_accounts
     CHECK(r->backend.clones.at(0).overrides.executable == false);
     fs::remove_all(dir);
@@ -402,13 +474,13 @@ TEST_CASE("transactions become backend requests with inferred account metas", "[
     REQUIRE(r->backend.txs.size() == 1);
     const auto& req = r->backend.txs[0];
     CHECK(req.fee_payer == pk("a"));
-    CHECK(req.compute_unit_limit == 200000u);
+    CHECK(req.compute_unit_limit == 200000U);
     REQUIRE(req.instructions.size() == 1);
     const auto& ix = req.instructions[0];
     CHECK(ix.data == sol::spl_transfer_data(5));
     REQUIRE(ix.accounts.size() == 3);
-    CHECK((ix.accounts[0].is_signer && ix.accounts[0].is_writable));   // b: signer by membership
-    CHECK((!ix.accounts[1].is_signer && !ix.accounts[1].is_writable)); // readonly()
+    CHECK((ix.accounts[0].is_signer && ix.accounts[0].is_writable));    // b: signer by membership
+    CHECK((!ix.accounts[1].is_signer && !ix.accounts[1].is_writable));  // readonly()
     CHECK(ix.accounts[2].is_signer);                                    // a: fee payer
 }
 
@@ -422,7 +494,7 @@ TEST_CASE("fee payer must sign", "[interp]") {
 }
 
 TEST_CASE("invoke encodes Anchor instructions from the program IDL", "[interp]") {
-    fs::path dir = temp_dir("tide_invoke_test");
+    const fs::path dir = temp_dir("tide_invoke_test");
     std::ofstream(dir / "counter.so") << "not really elf";
     std::ofstream(dir / "counter.json") << R"({
       "address": "11111111111111111111111111111111",
@@ -441,7 +513,7 @@ TEST_CASE("invoke encodes Anchor instructions from the program IDL", "[interp]")
                         "args": [{"name": "newValue", "type": "u32"}]}],
       "accounts": [{"name": "Legacy", "type": {"kind": "struct", "fields": [{"name": "flag", "type": "bool"}]}}]
     })";
-    std::string src = R"(
+    const std::string src = R"(
         keypair admin = seed("admin");
         keypair counter = seed("counter");
         let state = pda(counter.pubkey, ["state"]);
@@ -468,7 +540,10 @@ TEST_CASE("invoke encodes Anchor instructions from the program IDL", "[interp]")
     REQUIRE(r->backend.txs.size() == 2);
     const auto& ix = r->backend.txs[0].instructions[0];
     CHECK(ix.program_id == pk("counter"));
-    CHECK(sol::hex_encode(ix.data) == "0b12680968ae3b21" "0200000000000000" "00");
+    CHECK(sol::hex_encode(ix.data) ==
+          "0b12680968ae3b21"
+          "0200000000000000"
+          "00");
     REQUIRE(ix.accounts.size() == 3);
     CHECK(ix.accounts[0].pubkey == state);
     CHECK(ix.accounts[0].is_writable);
@@ -487,7 +562,8 @@ TEST_CASE("invoke encodes Anchor instructions from the program IDL", "[interp]")
           genesis { program counter { id = counter.pubkey; binary = "counter.so"; idl = "counter.json"; } }
           bootstrap { invoke counter.pubkey with { method = "increment"; accounts = { state: counter.pubkey }; args = { by: 1, extra: 2 }; signers = [counter]; }; }
         }
-    )", {}, dir / "bad.tid");
+    )",
+                   {}, dir / "bad.tid");
     CHECK(bad->has("instruction 'increment' has no argument 'extra'"));
     fs::remove_all(dir);
 }
@@ -502,7 +578,7 @@ TEST_CASE("await polls state queries", "[interp]") {
 // -------------------------------------------------------------- language --
 
 TEST_CASE("functions, recursion and control flow", "[interp]") {
-    std::string decls = R"(
+    const std::string decls = R"(
         fn fib(n: int) -> int { if n < 2 { return n; } return fib(n - 1) + fib(n - 2); }
         fn sum_odd(limit: int) -> int {
           let total = 0;
@@ -516,21 +592,26 @@ TEST_CASE("functions, recursion and control flow", "[interp]") {
           return total;
         }
     )";
-    CHECK(eval_print(decls, "print(fib(15), sum_odd(10));\nfor x in [1, 2] { for y in 0..=1 { print(x * 10 + y); } }") ==
-          "610 25\n10\n11\n20\n21\n");
+    CHECK(
+        eval_print(decls, "print(fib(15), sum_odd(10));\nfor x in [1, 2] { for y in 0..=1 { print(x * 10 + y); } }") ==
+        "610 25\n10\n11\n20\n21\n");
 }
 
 TEST_CASE("values have copy semantics", "[interp]") {
-    CHECK(eval_print("", "let a = {xs: [1, 2]};\nlet b = a;\nb.xs[0] = 9;\nprint(a.xs[0], b.xs[0]);").starts_with("1 9\n"));
+    CHECK(eval_print("", "let a = {xs: [1, 2]};\nlet b = a;\nb.xs[0] = 9;\nprint(a.xs[0], b.xs[0]);")
+              .starts_with("1 9\n"));
 }
 
 TEST_CASE("expressions evaluate with exact arithmetic", "[interp]") {
-    CHECK(eval_print("", "print(7 / 2, -7 % 3, 1.5 * 2, 1 SOL + 5 lamports, 2 s + 250 ms, \"a\" + \"b\", hex(\"01\") + u8(2));")
-              .starts_with("3 -1 3 1000000005 2250ms ab 0x0102\n"));
+    CHECK(
+        eval_print(
+            "", "print(7 / 2, -7 % 3, 1.5 * 2, 1 SOL + 5 lamports, 2 s + 250 ms, \"a\" + \"b\", hex(\"01\") + u8(2));")
+            .starts_with("3 -1 3 1000000005 2250ms ab 0x0102\n"));
     CHECK(eval_print("", "print(len([1,2,3]), len(\"abc\"), str(true), 3 > 2.5, [1, 2] == [1, 2], null == null);")
               .starts_with("3 3 true true true true\n"));
-    CHECK(eval_print("keypair a = seed(\"alice\");", "print(a.pubkey == seed(\"alice\").pubkey, sol(2), rent_exempt(0));")
-              .starts_with("true 2000000000 890880\n"));
+    CHECK(
+        eval_print("keypair a = seed(\"alice\");", "print(a.pubkey == seed(\"alice\").pubkey, sol(2), rent_exempt(0));")
+            .starts_with("true 2000000000 890880\n"));
 }
 
 TEST_CASE("runtime errors are positioned", "[interp]") {
@@ -545,19 +626,20 @@ TEST_CASE("runtime errors are positioned", "[interp]") {
     CHECK(run(net("let b = hex(\"0102\");\nb[5] += 1;"))->has("index 5 is out of bounds for bytes of length 2"));
     CHECK(run(net("let a = 200;\nlet b: u8 = a + 100;"))->has("300 is out of range for u8"));
     CHECK(run(net("assert 1 == 2, \"math\";"))->has("assertion failed: math"));
-    CHECK(run("fn loop_forever(n: int) -> int { return loop_forever(n + 1); }\nnetwork n { genesis { let x = loop_forever(0); } }")
+    CHECK(run("fn loop_forever(n: int) -> int { return loop_forever(n + 1); }\nnetwork n { genesis { let x = "
+              "loop_forever(0); } }")
               ->has("maximum call depth"));
     auto acct = run(net("let x = account_info(seed(\"nobody\").pubkey).lamports;"));
     CHECK(acct->has("cannot read member 'lamports' of null"));
 }
 
 TEST_CASE("borsh schemas encode and decode", "[interp]") {
-    std::string decls = R"(
+    const std::string decls = R"(
         schema Inner using borsh { flag: bool; }
         schema Rec using borsh { a: u16; b: i8; s: string; xs: [u8]; fixed: [u8; 2]; o: Option<u32>; t: (u8, string); inner: Inner; f: f32; }
         schema Acc using anchor { v: u64; }
     )";
-    std::string out = eval_print(decls, R"(
+    const std::string out = eval_print(decls, R"(
         let bytes = borsh(Rec, { a: 258, b: -1, s: "hi", xs: hex("0a0b"), fixed: [1, 2], t: [3, "z"], inner: { flag: true }, f: 1.5 });
         print(bytes);
         let back = decode(Rec, bytes);
@@ -565,8 +647,9 @@ TEST_CASE("borsh schemas encode and decode", "[interp]") {
         let acc = anchor(Acc, { v: 5 });
         print(len(acc), decode(Acc, acc).v);
     )");
-    CHECK(out.starts_with("0x0201ff020000006869020000000a0b01020003010000007a010000c03f\n"
-                          "258 -1 hi 0x0a0b 0x0102 null [3, \"z\"] true 1.5\n16 5\n"));
+    CHECK(
+        out.starts_with("0x0201ff020000006869020000000a0b01020003010000007a010000c03f\n"
+                        "258 -1 hi 0x0a0b 0x0102 null [3, \"z\"] true 1.5\n16 5\n"));
     auto bad = run(decls + "network n { genesis { let d = decode(Acc, hex(\"0000000000000000\")); } }");
     CHECK(bad->has("does not start with the anchor discriminator"));
 }
@@ -579,20 +662,25 @@ TEST_CASE("step budget stops runaway loops", "[interp][slow]") {
 // ------------------------------------------- regressions (code review) --
 
 TEST_CASE("malformed IDLs produce diagnostics, not crashes", "[interp]") {
-    fs::path dir = temp_dir("tide_bad_idl_test");
+    const fs::path dir = temp_dir("tide_bad_idl_test");
     std::ofstream(dir / "p.so") << "x";
     std::ofstream(dir / "no_type.json") << R"({"instructions": [], "accounts": [{"name": "Counter"}],
         "types": [{"name": "Counter", "type": {"kind": "struct", "fields": [{"name": "value"}]}}]})";
     std::ofstream(dir / "bad_array.json") << R"({"instructions": [], "accounts": [{"name": "Counter"}],
         "types": [{"name": "Counter", "type": {"kind": "struct", "fields": [{"name": "v", "type": {"array": ["u8"]}}]}}]})";
-    std::ofstream(dir / "bad_disc.json") << R"({"instructions": [], "accounts": [{"name": "Counter", "discriminator": [1,2,3,4,5,6,7,300]}],
+    std::ofstream(dir / "bad_disc.json")
+        << R"({"instructions": [], "accounts": [{"name": "Counter", "discriminator": [1,2,3,4,5,6,7,300]}],
         "types": [{"name": "Counter", "type": {"kind": "struct", "fields": []}}]})";
-    for (const auto& [file, message] : std::vector<std::pair<std::string, std::string>>{
-             {"no_type.json", "has no \"type\""}, {"bad_array.json", "must be [type, length]"}, {"bad_disc.json", "discriminator byte out of range"}}) {
+    for (const auto& [file, message] :
+         std::vector<std::pair<std::string, std::string>>{{"no_type.json", "has no \"type\""},
+                                                          {"bad_array.json", "must be [type, length]"},
+                                                          {"bad_disc.json", "discriminator byte out of range"}}) {
         INFO(file);
-        auto r = run("keypair p = seed(\"p\");\nnetwork n { genesis {\n  program p { id = p.pubkey; binary = \"p.so\"; idl = \"" + file +
-                         "\"; }\n  account seed(\"s\").pubkey { lamports = 1 SOL; data = anchor(\"Counter\", {}); }\n} }",
-                     {}, dir / "main.tid");
+        auto r = run(
+            "keypair p = seed(\"p\");\nnetwork n { genesis {\n  program p { id = p.pubkey; binary = \"p.so\"; idl = "
+            "\"" +
+                file + "\"; }\n  account seed(\"s\").pubkey { lamports = 1 SOL; data = anchor(\"Counter\", {}); }\n} }",
+            {}, dir / "main.tid");
         CHECK_FALSE(r->result.ok);
         CHECK(r->has(message));
     }
@@ -606,9 +694,12 @@ TEST_CASE("library exceptions in a scenario fail only that scenario", "[interp]"
           scenario first { transaction { signers = [a]; instruction memo_program() { data = memo("x"); } } }
           scenario second { print("second ran"); }
         }
-    )", {}, "test.tid", [](FakeBackend& b) {
-        b.on_tx = [](const TransactionRequest&) -> TxResult { throw std::runtime_error("RPC connection refused"); };
-    });
+    )",
+                 {}, "test.tid", [](FakeBackend& b) {
+                     b.on_tx = [](const TransactionRequest&) -> TxResult {
+                         throw std::runtime_error("RPC connection refused");
+                     };
+                 });
     INFO(r->dump());
     CHECK(r->result.ok);
     CHECK(r->result.scenarios_failed == 1);
@@ -619,10 +710,12 @@ TEST_CASE("library exceptions in a scenario fail only that scenario", "[interp]"
 }
 
 TEST_CASE("decoding untrusted lengths is bounded", "[interp]") {
-    auto r = run("schema E using borsh {}\nschema S using borsh { items: [E]; }\n"
-                 "network n { genesis { let s = decode(S, hex(\"ffffffff\")); } }");
+    auto r =
+        run("schema E using borsh {}\nschema S using borsh { items: [E]; }\n"
+            "network n { genesis { let s = decode(S, hex(\"ffffffff\")); } }");
     CHECK(r->has("exceeds the available data"));
-    auto r2 = run("schema S using borsh { xs: [u64]; }\nnetwork n { genesis { let s = decode(S, hex(\"02000000\")); } }");
+    auto r2 =
+        run("schema S using borsh { xs: [u64]; }\nnetwork n { genesis { let s = decode(S, hex(\"02000000\")); } }");
     CHECK(r2->has("exceeds the available data"));
 }
 
@@ -633,5 +726,6 @@ TEST_CASE("fixed-length lists, bytes/[u8] interop and checked conversions", "[in
     auto len = run("fn f(x: [u8; 2]) -> int { return len(x); }\nnetwork n { genesis { let x = f(hex(\"010203\")); } }");
     CHECK(len->has("expected 2 elements, found 3"));
     CHECK(run("network n { genesis { let d = 1 ms * 18446744073709551617; } }")->has("duration overflow"));
-    CHECK(run("network n { genesis { let x = sol(10000000000000000000000000000000.0 * 10000000000.0); } }")->has("out of range"));
+    CHECK(run("network n { genesis { let x = sol(10000000000000000000000000000000.0 * 10000000000.0); } }")
+              ->has("out of range"));
 }

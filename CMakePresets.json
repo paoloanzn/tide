@@ -19,11 +19,19 @@
       "displayName": "Release (vcpkg)",
       "binaryDir": "${sourceDir}/build/release",
       "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
+    },
+    {
+      "name": "lint",
+      "inherits": "default",
+      "displayName": "Debug + clang-tidy, warnings as errors",
+      "binaryDir": "${sourceDir}/build/lint",
+      "cacheVariables": { "TIDE_WERROR": "ON", "TIDE_CLANG_TIDY": "ON" }
     }
   ],
   "buildPresets": [
     { "name": "default", "configurePreset": "default" },
-    { "name": "release", "configurePreset": "release" }
+    { "name": "release", "configurePreset": "release" },
+    { "name": "lint", "configurePreset": "lint" }
   ],
   "testPresets": [
     { "name": "default", "configurePreset": "default", "output": { "outputOnFailure": true } }
