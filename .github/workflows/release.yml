@@ -148,12 +148,31 @@ jobs:
           set -euo pipefail
           asset="tide-${{ matrix.target }}.tar.gz"
           stage=$(mktemp -d)
-          cp build/release/tide README.md "$stage/"
+          cp build/release/tide README.md LICENSE NOTICE "$stage/"
+          # The vcpkg dependencies are linked in statically, so their licenses
+          # ship with the binary. Catch2 and the vcpkg-* helpers are build-only.
+          {
+            echo "The Tide binary statically links the libraries below. Their licenses"
+            echo "and copyright notices follow."
+            for f in build/vcpkg_installed/*/share/*/copyright; do
+              port=$(basename "$(dirname "$f")")
+              case "$port" in catch2 | vcpkg-*) continue ;; esac
+              printf '\n\n==================== %s ====================\n\n' "$port"
+              cat "$f"
+            done
+          } > "$stage/THIRD_PARTY_LICENSES.txt"
+          for port in foonathan-lexy libsodium openssl cpr curl nlohmann-json; do
+            if ! grep -q "= $port =" "$stage/THIRD_PARTY_LICENSES.txt"; then
+              echo "::error::no license found for the linked dependency $port"
+              exit 1
+            fi
+          done
+          grep '^=====' "$stage/THIRD_PARTY_LICENSES.txt"
           strip "$stage/tide"
           test "$("$stage/tide" --version)" = "tide $VERSION"
           "$stage/tide" check tests/examples/07_e2e_tokens.tid
           mkdir -p dist
-          tar -C "$stage" -czf "dist/$asset" tide README.md
+          tar -C "$stage" -czf "dist/$asset" tide README.md LICENSE NOTICE THIRD_PARTY_LICENSES.txt
           (cd dist && shasum -a 256 "$asset" > "$asset.sha256")
           cat "dist/$asset.sha256"
       - name: Inspect the binary (Linux)

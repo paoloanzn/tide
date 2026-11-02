@@ -255,3 +255,16 @@ The full documentation is in [`docs/`](docs/README.md). Good places to start:
 - [Tutorial](docs/getting-started/tutorial.md): build a network step by step.
 - [Language reference](docs/README.md#language-reference): the language, page by page.
 - [CLI reference](docs/reference/cli.md): commands, options and exit codes.
+
+## License
+
+Tide is licensed under the [Apache License, Version 2.0](LICENSE). You may
+use, modify and distribute it, including in commercial products. If you
+redistribute Tide, modified or not, in source form or as part of your own
+product, include a copy of the license and the attribution in
+[`NOTICE`](NOTICE), and mark the files you changed. Using Tide to define and
+run networks puts no conditions on your scripts, your programs, or the
+networks they produce.
+
+Unless you state otherwise, contributions to Tide are accepted under the same
+license.

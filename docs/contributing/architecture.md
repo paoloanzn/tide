@@ -1,6 +1,6 @@
 # Architecture and contributing
 
-This page is for people who want to build Tide from source, find their way around the code, or extend it. It covers the build, the source layout, the pipeline from source text to a running network, the backend boundary, diagnostics, the test suite, and short checklists for common changes.
+This page is for people who want to build Tide from source, find their way around the code, or extend it. Tide is licensed under the [Apache License 2.0](../../LICENSE); contributions are accepted under the same license. It covers the build, the source layout, the pipeline from source text to a running network, the backend boundary, diagnostics, the test suite, and short checklists for common changes.
 
 ## Building from source
 
@@ -147,7 +147,7 @@ Two GitHub Actions workflows live in `.github/workflows/`.
 | `tide-linux-arm64.tar.gz` | Ubuntu 22.04 arm64, GCC 12 | glibc 2.35 or newer |
 | `tide-macos-arm64.tar.gz` | macOS 15, Apple Clang | macOS 14 or newer (`MACOSX_DEPLOYMENT_TARGET`) |
 
-Each archive holds the stripped `tide` binary and `README.md`, and has a `.sha256` file next to it. The vcpkg dependencies are linked statically. On Linux, `-static-libstdc++ -static-libgcc` link the C++ runtime in too, so the binary needs only glibc. Each build job runs the unit tests, checks that `tide --version` matches the tag, and runs `tide check` on an example. Once the builds and the whole CI workflow (called from `release.yml`) pass, the publish job creates the GitHub release for the tag, attaches the archives, their `.sha256` files and a combined `checksums.txt`, and uses GitHub's generated release notes. Re-running the workflow for a tag that already has a release replaces its assets.
+Each archive holds the stripped `tide` binary, `README.md`, `LICENSE`, `NOTICE` and `THIRD_PARTY_LICENSES.txt`, and has a `.sha256` file next to it. The vcpkg dependencies are linked statically, so the package step collects their licenses from vcpkg into `THIRD_PARTY_LICENSES.txt` and fails if one of the linked ports is missing. On Linux, `-static-libstdc++ -static-libgcc` link the C++ runtime in too, so the binary needs only glibc. Each build job runs the unit tests, checks that `tide --version` matches the tag, and runs `tide check` on an example. Once the builds and the whole CI workflow (called from `release.yml`) pass, the publish job creates the GitHub release for the tag, attaches the archives, their `.sha256` files and a combined `checksums.txt`, and uses GitHub's generated release notes. Re-running the workflow for a tag that already has a release replaces its assets.
 
 Running `release.yml` by hand from the Actions tab (`workflow_dispatch`) is a dry run: everything is built and packaged and the archives are kept as run artifacts, but nothing is published.
 
