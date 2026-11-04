@@ -268,8 +268,11 @@ diagnostics: they have no location and are not counted in the summary.
 ### Color
 
 Diagnostics are colored when stderr is a terminal (`isatty`), and plain
-otherwise, for example when piped or redirected to a file. There is no option
-or environment variable to change this.
+otherwise, for example when piped or redirected to a file. Like GCC and Clang,
+Tide also prints them plain when `TERM` is unset or `dumb`, or when `NO_COLOR`
+is set to a non-empty value ([no-color.org](https://no-color.org)). Use
+`NO_COLOR=1` for tools that run Tide on a terminal but parse its output, such
+as Emacs' `M-x compile`.
 
 | Part | Style |
 |------|-------|
