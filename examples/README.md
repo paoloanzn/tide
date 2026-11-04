@@ -10,6 +10,8 @@ This directory holds **upstream-grounded examples** of running Solana programs i
 | [02 — Subscriptions](02-subscriptions/) | [solana-foundation/subscriptions](https://github.com/solana-foundation/subscriptions/tree/0149b8c4fd362c1f02b1de6a4a5edfe14c724fba) | Canonical program ID, deterministic users, synthetic SPL mint, live token transfer | **Scaffold only**, subscription flows not yet implemented |
 | [03 — Tokenized Vaults](03-vaults/) | Private application case study | Multi-program DeFi setup, external lending dependencies, stateful end-to-end scenarios | Author-reported successful run; no public executable source |
 
+The [Subscriptions read-only dashboard](02-subscriptions/demo.html) is a lightweight frontend that queries the Tide-launched local RPC for the seeded wallets, mint and program account. It is **not** a full Subscriptions UI or payment-flow integration.
+
 ## What to measure
 
 Judge the **whole environment**, not the length of one runbook. Keep a record of:
