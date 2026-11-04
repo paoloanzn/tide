@@ -1,0 +1,76 @@
+// Solana Foundation Subscriptions: local full-stack development scaffold.
+// Loads the REAL Pinocchio program at its canonical program ID.
+// This stage provisions token balances and tests ordinary SPL transfers;
+// subscription-plan creation / recurring payments are NOT tested here.
+// See README.md for prerequisites and the upstream source commit.
+
+let SUBSCRIPTIONS = pubkey("De1egAFMkMWZSN5rYXRj9CAdheBamobVNubTsi9avR44");
+keypair merchant = seed("tide:subscriptions:merchant");
+keypair alice = seed("tide:subscriptions:alice");
+keypair bob = seed("tide:subscriptions:bob");
+keypair usd = seed("tide:subscriptions:demo-usd");
+
+let wallets = [merchant.pubkey, alice.pubkey, bob.pubkey];
+let UNIT = 1000000;
+
+network subscriptions_local {
+  validator local {
+    rpc_port = 28899;
+    gossip_port = 28001;
+    faucet_port = 29900;
+    dynamic_port_range = "28002-28040";
+  }
+
+  genesis {
+    program subscriptions {
+      id = SUBSCRIPTIONS;
+      binary = "upstream/target/deploy/subscriptions_program.so";
+    }
+
+    // Deterministic fixture wallets and synthetic USD token.
+    // These local keys are public and have no real-world value.
+    mint usd.pubkey {
+      decimals = 6;
+      mint_authority = merchant.pubkey;
+      supply = 3000 * UNIT;
+    }
+
+    for user in wallets {
+      account user { lamports = 10 SOL; }
+      associated_token_account ata(user, usd.pubkey) {
+        mint = usd.pubkey;
+        owner = user;
+        amount = 1000 * UNIT;
+      }
+    }
+
+    assert exists(SUBSCRIPTIONS), "subscriptions program missing";
+    assert token_balance(ata(alice.pubkey, usd.pubkey)) == 1000 * UNIT;
+  }
+
+  scenario initial_balances {
+    for user in wallets {
+      assert balance(user) == 10 SOL;
+      assert token_balance(ata(user, usd.pubkey)) == 1000 * UNIT;
+    }
+  }
+
+  // Verifies the fixture against a real SPL transaction on the running validator.
+  // It intentionally does NOT call the Subscriptions program yet.
+  scenario merchant_sends_test_payment {
+    transaction as tx {
+      signers = [merchant];
+      instruction token_program() {
+        accounts = [
+          ata(merchant.pubkey, usd.pubkey),
+          ata(alice.pubkey, usd.pubkey),
+          merchant.pubkey
+        ];
+        data = spl_transfer(25 * UNIT);
+      }
+    }
+    assert tx.success, "SPL fixture transfer failed";
+    assert token_balance(ata(alice.pubkey, usd.pubkey)) == 1025 * UNIT;
+    assert token_balance(ata(merchant.pubkey, usd.pubkey)) == 975 * UNIT;
+  }
+}
