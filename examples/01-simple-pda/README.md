@@ -2,7 +2,7 @@
 
 **Source:** [txtx/surfpool-examples / anchor/simple-pda](https://github.com/txtx/surfpool-examples/tree/c783f4192aaebf48d39ea2787c51278527056982/anchor/simple-pda)  
 **Pinned upstream commit:** `c783f4192aaebf48d39ea2787c51278527056982`  
-**Status:** Tide script and minimal instruction IDL authored; **not yet end-to-end verified** on this branch.
+**Status:** `tide check` passed on Linux and macOS ([CI run](https://github.com/paoloanzn/tide/actions/runs/41859558611)); **end-to-end validation with the compiled upstream binary is still pending**.
 
 The upstream sample uses Surfpool/txtx deployment and call runbooks to deploy an Anchor program whose `run` instruction creates (if needed) a PDA and increments an on-chain counter.
 
