@@ -109,3 +109,7 @@ jobs:
         run: cmake --build --preset default
       - name: Test
         run: ctest --preset default
+      - name: Check public protocol examples
+        run: |
+          ./build/debug/tide check examples/01-simple-pda/network.tid
+          ./build/debug/tide check examples/02-subscriptions/network.tid
