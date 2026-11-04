@@ -1,0 +1,65 @@
+// Port of the simple-pda program from txtx/surfpool-examples.
+// Upstream source is pinned and built following README.md.
+// All seed-derived keys are LOCAL TEST KEYS; never use them on mainnet.
+
+keypair caller = seed("tide:simple-pda:caller");
+let PROGRAM = pubkey("Akbajztf6ZSGXytTXKDd7MsGVviNCaEumvigp5BWaV8a");
+let custom = pda(PROGRAM, ["custom", caller.pubkey]);
+
+schema CustomAccount using anchor {
+  counter: u64;
+}
+
+network simple_pda {
+  validator local {
+    rpc_port = 18899;
+    gossip_port = 18001;
+    faucet_port = 19900;
+    dynamic_port_range = "18002-18040";
+  }
+
+  genesis {
+    account caller.pubkey { lamports = 10 SOL; }
+
+    program simple_pda {
+      id = PROGRAM;
+      binary = "upstream/anchor/simple-pda/target/deploy/simple_pda.so";
+      idl = "simple_pda.idl.json";
+    }
+
+    assert !exists(custom), "custom account should not exist before initialization";
+  }
+
+  // Execute the real program once, then save the initialized ledger.
+  bootstrap {
+    invoke PROGRAM with {
+      method = "run";
+      accounts = {
+        sender: caller.pubkey,
+        custom: custom,
+        system_program: system_program()
+      };
+      signers = [caller];
+    };
+    assert exists(custom), "first invocation did not initialize the PDA";
+  }
+
+  scenario initialized {
+    let state = decode(CustomAccount, account_info(custom).data);
+    assert state.counter == 1, "counter must start at one";
+  }
+
+  scenario increment {
+    invoke PROGRAM with {
+      method = "run";
+      accounts = {
+        sender: caller.pubkey,
+        custom: custom,
+        system_program: system_program()
+      };
+      signers = [caller];
+    };
+    let state = decode(CustomAccount, account_info(custom).data);
+    assert state.counter == 2, "second invocation must increment the counter";
+  }
+}
