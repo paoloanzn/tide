@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#08121e">
+  <meta name="description" content="Tide is an experimental programming language for defining Solana local networks, loading programs, preparing accounts and running integration scenarios.">
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="Tide — Solana environments, written as code">
+  <meta property="og:description" content="From a simple funded wallet to real multi-program development networks. Define genesis, bootstrap and scenarios in one language.">
+  <meta property="og:url" content="https://paoloanzn.github.io/tide/">
+  <title>Tide — Solana environments, written as code</title>
+  <style>
+    :root { color-scheme: dark; --bg:#08121e; --surface:#0d1b2b; --card:#112238; --line:#294155; --light:#ecf9ff; --text:#b5c7d9; --muted:#819aaf; --aqua:#8be8d8; --mint:#70d2b1; --blue:#91baf9; --radius:18px; }
+    * { box-sizing: border-box; }
+    html { scroll-behavior:smooth; }
+    body { background: radial-gradient(ellipse at 80% -10%, #19384b 0, transparent 40%), var(--bg); color:var(--light); font: 16px/1.6 ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; margin:0; }
+    a { color:var(--aqua); text-decoration:none; }
+    a:hover { text-decoration:underline; }
+    a:focus-visible, button:focus-visible { outline: 2px solid var(--aqua); outline-offset:4px; }
+    .shell { width:min(1120px, calc(100% - 44px)); margin:0 auto; }
+    .nav { min-height:82px; display:flex; justify-content:space-between; align-items:center; gap:18px; border-bottom:1px solid var(--line); }
+    .logo { display:flex; align-items:center; gap:11px; color:var(--light); font-weight:790; letter-spacing:-.04em; font-size:25px; }
+    .mark { width:34px; height:34px; display:block; }
+    .nav-links { display:flex; gap:23px; align-items:center; flex-wrap:wrap; font-size:14px; }
+    .nav-links a { color:var(--text); }
+    .nav-links a:last-child { color:var(--aqua); }
+    .hero { padding:90px 0 78px; max-width:850px; }
+    .eyebrow { text-transform:uppercase; font-size:12px; letter-spacing:.19em; font-weight:760; color:var(--aqua); }
+    h1 { font-size:clamp(43px, 6vw, 76px); letter-spacing:-.065em; line-height:1.08; margin:18px 0 24px; font-weight:750; }
+    .gradient { color:var(--aqua); }
+    .lead { color:var(--text); font-size:clamp(17px,2.3vw,21px); max-width:710px; margin:0 0 28px; }
+    .actions { display:flex; gap:12px; flex-wrap:wrap; margin-top:30px; }
+    .btn { display:inline-flex; justify-content:center; align-items:center; gap:9px; border-radius:11px; padding:12px 19px; font-size:14px; font-weight:750; border:1px solid #5fc5ae; background:var(--aqua); color:#061722; cursor:pointer; }
+    .btn:hover { text-decoration:none; filter:brightness(1.06); }
+    .btn.secondary { background:transparent; border-color:var(--line); color:var(--light); }
+    .hint { font-size:13px; color:var(--muted); margin-top:19px; }
+    .section { padding:62px 0; border-top:1px solid var(--line); }
+    .section-head { max-width:740px; margin-bottom:28px; }
+    h2 { font-size:clamp(29px,4vw,43px); letter-spacing:-.047em; line-height:1.19; margin:10px 0 14px; }
+    .desc { color:var(--text); font-size:16px; margin:0; }
+    .workbench { border:1px solid var(--line); border-radius:var(--radius); overflow:hidden; background:#07121d; box-shadow:0 12px 46px #0002; }
+    .workbench-top { display:flex; justify-content:space-between; flex-wrap:wrap; gap:12px; align-items:center; padding:12px 18px; background:#102238; border-bottom:1px solid var(--line); }
+    .tabs { display:flex; gap:5px; flex-wrap:wrap; }
+    .tab { border:0; background:transparent; color:var(--muted); font-weight:680; font-size:13px; padding:7px 12px; border-radius:8px; cursor:pointer; }
+    .tab[aria-selected="true"] { background:#24465c; color:var(--light); }
+    .filepath { font-size:12px; color:var(--muted); }
+    pre { overflow:auto; margin:0; padding:28px; color:#d1e6ef; font-size:13.7px; line-height:1.78; min-height:300px; }
+    code { font: 0.92em/1.6 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,monospace; }
+    pre code { font-size:inherit; }
+    .note { padding:14px 18px; color:var(--muted); font-size:13px; background:#0e2134; border-top:1px solid var(--line); }
+    .pill { display:inline-block; padding:3px 9px; border-radius:30px; color:#d5f8e9; background:#1d453c; border:1px solid #357568; font-size:11px; font-weight:720; }
+    .pill.pending { background:#2a3545; border-color:#4a5c6c; color:#c2d3e3; }
+    .grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:16px; }
+    .tile { padding:24px; background:var(--surface); border:1px solid var(--line); border-radius:var(--radius); display:flex; flex-direction:column; align-items:flex-start; gap:8px; min-height:340px; }
+    .tile h3 { font-size:23px; letter-spacing:-.04em; margin:7px 0 0; }
+    .tile p { color:var(--text); font-size:14px; margin:0; }
+    .tile .small { font-size:12px; color:var(--muted); }
+    .tile a { font-size:13px; font-weight:740; margin-top:auto; padding-top:13px; }
+    .tile-number { color:var(--aqua); font-size:12px; letter-spacing:.14em; font-weight:760; }
+    .features { display:grid; grid-template-columns:repeat(3,1fr); gap:20px; }
+    .feature { padding:6px 8px 8px 0; }
+    .feature .symbol { color:var(--aqua); font-size:25px; }
+    .feature h3 { font-size:18px; margin:12px 0 8px; }
+    .feature p { color:var(--text); margin:0; font-size:14px; }
+    .install { display:flex; align-items:center; justify-content:space-between; background:#06101a; border:1px solid var(--line); border-radius:11px; gap:16px; padding:16px 17px; margin-top:19px; }
+    .install code { white-space:nowrap; overflow:auto; font-size:12.5px; color:var(--aqua); }
+    .copy { flex-shrink:0; border:1px solid var(--line); background:#173247; color:var(--light); border-radius:8px; padding:8px 12px; cursor:pointer; }
+    .caution { padding:22px; background:#142332; border:1px solid var(--line); border-radius:12px; color:var(--text); }
+    .caution strong { color:var(--light); }
+    .cta { border:1px solid #356e6d; background:linear-gradient(130deg,#123d43,#102538); padding:36px; border-radius:var(--radius); }
+    .cta h2 { max-width:650px; }
+    footer { margin-top:54px; padding:24px 0 38px; border-top:1px solid var(--line); display:flex; justify-content:space-between; gap:22px; flex-wrap:wrap; color:var(--muted); font-size:13px; }
+    @media(max-width:780px) { .hero { padding:62px 0 48px; } .grid, .features { grid-template-columns:1fr; } .tile { min-height:auto; } .section { padding:46px 0; } .nav-links { gap:12px; } .workbench-top { flex-direction:column; align-items:flex-start; } }
+    @media(prefers-reduced-motion:reduce) { html {scroll-behavior:auto;} }
+  </style>
+</head>
+<body>
+  <header class="shell">
+    <nav class="nav" aria-label="Main navigation">
+      <a class="logo" href="#top" aria-label="Tide home">
+        <svg class="mark" viewBox="0 0 40 40" fill="none" aria-hidden="true"><path d="M4 24c7-11 12-11 19 0s10 8 13 0" stroke="#8be8d8" stroke-width="4" stroke-linecap="round"/><path d="M4 13c7-8 12-8 19 0s10 6 13 0" stroke="#6fb3f1" stroke-width="4" stroke-linecap="round"/></svg>
+        tide
+      </a>
+      <div class="nav-links">
+        <a href="#language">Language</a>
+        <a href="#environments">Examples</a>
+        <a href="https://github.com/paoloanzn/tide/tree/main/docs">Docs</a>
+        <a href="https://github.com/paoloanzn/tide">GitHub ↗</a>
+      </div>
+    </nav>
+    <section id="top" class="hero">
+      <div class="eyebrow">Experimental Solana developer tooling · v0.1.0</div>
+      <h1>Your Solana network.<br><span class="gradient">Written as code.</span></h1>
+      <p class="lead">Tide is a programming language for describing local Solana environments: accounts, programs, tokens, initial state, bootstrap transactions and executable scenarios in one source file.</p>
+      <div class="actions">
+        <a class="btn" href="#language">Explore the language <span aria-hidden="true">→</span></a>
+        <a class="btn secondary" href="#environments">Real-protocol gallery</a>
+      </div>
+      <p class="hint">Designed for humans to review and AI agents to generate. Uses Agave solana-test-validator today.</p>
+    </section>
+  </header>
+
+  <main class="shell">
+    <section class="section" id="language">
+      <div class="section-head">
+        <div class="eyebrow">The mental model</div>
+        <h2>One language for the whole setup.</h2>
+        <p class="desc">Declare the state you need, run the initialization that requires real transactions, then verify the environment. No separate configuration language is required for these phases.</p>
+      </div>
+      <div class="workbench">
+        <div class="workbench-top">
+          <div role="tablist" class="tabs" aria-label="Code examples">
+            <button class="tab" role="tab" aria-selected="true" aria-controls="panel-funding" id="tab-funding" data-panel="funding">Simple state</button>
+            <button class="tab" role="tab" aria-selected="false" aria-controls="panel-pda" id="tab-pda" data-panel="pda">Real program</button>
+            <button class="tab" role="tab" aria-selected="false" aria-controls="panel-subs" id="tab-subs" data-panel="subs">Token fixture</button>
+          </div>
+          <div class="filepath" id="file-label">hello.tid</div>
+        </div>
+        <div role="tabpanel" id="panel-funding" aria-labelledby="tab-funding"><pre><code>keypair alice = seed("alice");
+keypair bob = seed("bob");
+
+network hello {
+  genesis {
+    account alice.pubkey { lamports = 10 SOL; }
+    account bob.pubkey { lamports = 1 SOL; }
+  }
+
+  scenario funded {
+    assert balance(alice.pubkey) == 10 SOL;
+  }
+}</code></pre></div>
+        <div role="tabpanel" id="panel-pda" aria-labelledby="tab-pda" hidden><pre><code>// Excerpt of examples/01-simple-pda/network.tid
+bootstrap {
+  invoke PROGRAM with {
+    method = "run";
+    accounts = {
+      sender: caller.pubkey,
+      custom: custom,
+      system_program: system_program()
+    };
+    signers = [caller];
+  };
+  assert exists(custom);
+}
+
+scenario initialized {
+  let state = decode(CustomAccount, account_info(custom).data);
+  assert state.counter == 1;
+}</code></pre></div>
+        <div role="tabpanel" id="panel-subs" aria-labelledby="tab-subs" hidden><pre><code>// Excerpt of examples/02-subscriptions/network.tid
+genesis {
+  program subscriptions {
+    id = SUBSCRIPTIONS;
+    binary = "upstream/target/deploy/subscriptions_program.so";
+  }
+  mint usd.pubkey {
+    decimals = 6;
+    mint_authority = merchant.pubkey;
+    supply = 3000 * UNIT;
+  }
+  for user in wallets {
+    account user { lamports = 10 SOL; }
+    associated_token_account ata(user, usd.pubkey) {
+      mint = usd.pubkey;
+      owner = user;
+      amount = 1000 * UNIT;
+    }
+  }
+}</code></pre></div>
+        <div class="note">The simple-state example is illustrative. Program and fixture examples are in the gallery; clean-machine runtime verification of these new ports is pending.</div>
+      </div>
+    </section>
+
+    <section class="section" id="environments">
+      <div class="section-head">
+        <div class="eyebrow">Open-source protocol gallery</div>
+        <h2>Inspect real environments. Build your own.</h2>
+        <p class="desc">Each entry links to actual Solana source code and documents how a Tide environment is being constructed. Implementation and verification statuses are visible—no untested parity claims.</p>
+      </div>
+      <div class="grid">
+        <article class="tile">
+          <div class="tile-number">01 / ANCHOR</div>
+          <h3>Simple PDA</h3>
+          <span class="pill pending">Source port · E2E pending</span>
+          <p>Port of an official Surfpool sample: load the same program, call its PDA-creating instruction and assert its decoded counter.</p>
+          <p class="small">Upstream: txtx/surfpool-examples</p>
+          <a href="https://github.com/paoloanzn/tide/tree/main/examples/01-simple-pda">Explore setup →</a>
+        </article>
+        <article class="tile">
+          <div class="tile-number">02 / FULL STACK</div>
+          <h3>Subscriptions</h3>
+          <span class="pill pending">Fixture · E2E pending</span>
+          <p>Preload a real Pinocchio program and provision merchant, subscribers and SPL balances. Subscription instruction flows are still to be added.</p>
+          <p class="small">Upstream: solana-foundation/subscriptions</p>
+          <a href="https://github.com/paoloanzn/tide/tree/main/examples/02-subscriptions">Explore setup →</a>
+        </article>
+        <article class="tile">
+          <div class="tile-number">03 / CASE STUDY</div>
+          <h3>Tokenized vaults</h3>
+          <span class="pill">Author-reported working</span>
+          <p>Private integration example: custom vault and adapter programs, Jupiter Lend dependencies, two strategies and 15 ordered scenarios.</p>
+          <p class="small">Architecture only · No public executable artifact</p>
+          <a href="https://github.com/paoloanzn/tide/tree/main/examples/03-vaults">Read case study →</a>
+        </article>
+      </div>
+      <p class="hint">Third-party protocols are linked for educational purposes. Tide is not endorsed by the upstream projects.</p>
+    </section>
+
+    <section class="section" id="agent">
+      <div class="section-head">
+        <div class="eyebrow">Built for an agent-assisted workflow</div>
+        <h2>Give your agent a protocol. Keep the environment readable.</h2>
+        <p class="desc">Ask an agent to inspect the program, create a Tide network and iterate on compile or runtime errors. The outcome is an explicit, versioned environment that can be reviewed without opening a chain of unrelated setup tools.</p>
+      </div>
+      <div class="features">
+        <div class="feature"><div class="symbol">01</div><h3>Specify</h3><p>Define which accounts and programs should exist at genesis, with deterministic local keys and typed fields.</p></div>
+        <div class="feature"><div class="symbol">02</div><h3>Bootstrap</h3><p>Initialize application state with real transactions, pre-load binaries or clone selected remote accounts.</p></div>
+        <div class="feature"><div class="symbol">03</div><h3>Verify</h3><p>Run named scenarios and inspect errors with source locations. Then connect your backend or frontend to the RPC.</p></div>
+      </div>
+    </section>
+
+    <section class="section" id="start">
+      <div class="section-head">
+        <div class="eyebrow">Get started</div>
+        <h2>Install Tide. Describe your network.</h2>
+        <p class="desc">Install the experimental CLI, then run <code>tide check</code>, <code>tide up</code> and <code>tide down</code>. The local validator requires the Solana/Agave CLI.</p>
+      </div>
+      <div class="install">
+        <code id="install-code">curl -fsSL https://raw.githubusercontent.com/paoloanzn/tide/main/install.sh | sh</code>
+        <button class="copy" type="button" id="copy-install" aria-label="Copy install command">Copy</button>
+      </div>
+      <p class="hint">Review third-party shell scripts before executing them. Installer checks release SHA-256 checksums. Linux and Apple silicon macOS binaries are available.</p>
+      <div class="caution"><strong>Current limitations.</strong> Tide v0.1.0 has one test-validator backend; <code>fork</code> copies the feature set, not the entire remote state. Remote account clones reflect current upstream data. Snapshot, restore, time travel, multi-validator execution and package distribution are not yet implemented. Avoid publicly derived seed keys on real networks.</div>
+    </section>
+    <section class="section">
+      <div class="cta">
+        <div class="eyebrow">Open source · Apache 2.0</div>
+        <h2>Build a better Solana development environment.</h2>
+        <p class="desc">Tide is early. The language, examples and backend interface are available in the public repository. Contributions and reproducible real-world test cases are welcome.</p>
+        <div class="actions"><a class="btn" href="https://github.com/paoloanzn/tide">View GitHub repository ↗</a><a class="btn secondary" href="https://github.com/paoloanzn/tide/tree/main/examples">Explore examples</a></div>
+      </div>
+    </section>
+  </main>
+  <footer class="shell">
+    <span>© 2026 Tide contributors · Apache-2.0 · Experimental software.</span>
+    <span>Independent open-source project · <a href="https://github.com/paoloanzn/tide/blob/main/LICENSE">License</a></span>
+  </footer>
+  <script>
+    (() => {
+      const labels = { funding: 'hello.tid', pda: 'examples/01-simple-pda/network.tid', subs: 'examples/02-subscriptions/network.tid' };
+      const tabs = Array.from(document.querySelectorAll('.tab[data-panel]'));
+      tabs.forEach(tab => tab.addEventListener('click', () => {
+        const value = tab.dataset.panel;
+        tabs.forEach(other => other.setAttribute('aria-selected', String(other === tab)));
+        Object.keys(labels).forEach(key => { document.getElementById('panel-' + key).hidden = key !== value; });
+        document.getElementById('file-label').textContent = labels[value];
+      }));
+      const button = document.getElementById('copy-install');
+      button.addEventListener('click', async () => {
+        try {
+          await navigator.clipboard.writeText(document.getElementById('install-code').textContent);
+          button.textContent = 'Copied';
+          setTimeout(() => button.textContent = 'Copy', 1800);
+        } catch {
+          button.textContent = 'Select command to copy';
+        }
+      });
+    })();
+  </script>
+</body>
+</html>
