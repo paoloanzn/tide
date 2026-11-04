@@ -45,6 +45,18 @@ Expected outcome **to verify**: two scenarios pass and the local RPC responds wh
 
 To use the upstream webapp, its wallet and SDK must be pointed at the new RPC, and the appropriate on-chain Subscription Authority / plan accounts must be initialized by the application or an additional setup script. Do not treat this environment as an end-to-end Subscriptions demo yet.
 
+### Inspect the environment in a browser
+
+After running `tide up`, start a separate HTTP server from this example directory:
+
+```sh
+cd examples/02-subscriptions
+python3 -m http.server 8000
+# Open http://127.0.0.1:8000/demo.html
+```
+
+[demo.html](demo.html) is a small **read-only RPC dashboard**: it queries the real program account, the test mint and merchant/Alice/Bob balances. It does not use the upstream webapp, send transactions or exercise subscription-plan logic. The fixture addresses are derived from the documented Tide seed algorithm. Browser-to-RPC CORS support depends on the validator configuration. This client has not yet been browser-tested in this branch.
+
 ### Agent prompt
 
 > Read the pinned source for Solana Foundation Subscriptions and the Tide `network.tid` scaffold. Extend it with the minimum authentic instruction sequence to create a merchant subscription plan and a subscriber delegation. Prefer exact instruction layouts from the generated Codama SDK. Execute the resulting flows and assert account state; do not claim success unless the actual program executes on the local validator.
