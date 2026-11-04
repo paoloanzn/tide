@@ -2,12 +2,12 @@
 
 This directory holds **upstream-grounded examples** of running Solana programs in local networks created with Tide. Each example links to real upstream code, records an upstream commit and states what is—and is not—covered.
 
-> Verification status as of 2026-11-04: the two new `network.tid` files are **source-level drafts**. They have **not yet** been run through `tide check` or `tide up` on this branch. Do not publish passing test counts until a clean-machine run has been recorded.
+> Verification as of 2026-11-04: **`tide check` passed for both new scripts on Linux and macOS** in [GitHub Actions](https://github.com/paoloanzn/tide/actions/runs/41859558611). Neither example has yet been validated with its compiled upstream program by a clean-machine `tide up` run. Do not publish end-to-end pass claims until they are recorded.
 
 | Example | Protocol/source | What it exercises | Current verification |
 | --- | --- | --- | --- |
-| [01 — Simple PDA](01-simple-pda/) | [txtx/surfpool-examples](https://github.com/txtx/surfpool-examples/tree/c783f4192aaebf48d39ea2787c51278527056982/anchor/simple-pda) | Preloaded Anchor program, deterministic PDA, real `invoke`, state decoding | Source port, runtime test pending |
-| [02 — Subscriptions](02-subscriptions/) | [solana-foundation/subscriptions](https://github.com/solana-foundation/subscriptions/tree/0149b8c4fd362c1f02b1de6a4a5edfe14c724fba) | Canonical program ID, deterministic users, synthetic SPL mint, live token transfer | **Scaffold only**, subscription flows not yet implemented |
+| [01 — Simple PDA](01-simple-pda/) | [txtx/surfpool-examples](https://github.com/txtx/surfpool-examples/tree/c783f4192aaebf48d39ea2787c51278527056982/anchor/simple-pda) | Preloaded Anchor program, deterministic PDA, real `invoke`, state decoding | Static check passed; runtime pending |
+| [02 — Subscriptions](02-subscriptions/) | [solana-foundation/subscriptions](https://github.com/solana-foundation/subscriptions/tree/0149b8c4fd362c1f02b1de6a4a5edfe14c724fba) | Canonical program ID, deterministic users, synthetic SPL mint, live token transfer | **Scaffold only**; static check passed; subscription flows not implemented |
 | [03 — Tokenized Vaults](03-vaults/) | Private application case study | Multi-program DeFi setup, external lending dependencies, stateful end-to-end scenarios | Author-reported successful run; no public executable source |
 
 The [Subscriptions read-only dashboard](02-subscriptions/demo.html) is a lightweight frontend that queries the Tide-launched local RPC for the seeded wallets, mint and program account. It is **not** a full Subscriptions UI or payment-flow integration.
