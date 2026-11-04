@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <span>
@@ -179,6 +180,18 @@ int run_up(const tide::sema::Program& program, const tide::ast::NetworkDecl& net
     return (result.scenarios_failed != 0U) ? 3 : 0;
 }
 
+// Diagnostics are colored only on a terminal, and like GCC and Clang never when TERM is unset or "dumb". A non-empty
+// NO_COLOR (https://no-color.org) turns colors off too, for terminals that do support them, like Emacs' M-x compile.
+bool use_color() {
+    if (::isatty(STDERR_FILENO) == 0) return false;
+    // NOLINTBEGIN(concurrency-mt-unsafe): no thread-safe getenv exists; Tide never modifies its environment
+    const char* no_color = std::getenv("NO_COLOR");
+    const char* term = std::getenv("TERM");
+    // NOLINTEND(concurrency-mt-unsafe)
+    if (no_color != nullptr && *no_color != '\0') return false;
+    return term != nullptr && std::string_view(term) != "dumb";
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -196,7 +209,7 @@ int main(int argc, char** argv) {
         return 2;
     }
 
-    const bool color = ::isatty(STDERR_FILENO) != 0;
+    const bool color = use_color();
     tide::SourceManager sources;
     tide::Diagnostics diags(sources);
     auto finish = [&](int code) {
