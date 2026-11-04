@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Read-only browser dashboard for the Tide Solana Subscriptions development environment">
+  <title>Tide · Subscriptions sandbox dashboard</title>
+  <style>
+    :root{color-scheme:dark;--bg:#091625;--card:#122439;--line:#2a4555;--text:#e9f8ff;--sub:#a5bdd0;--accent:#82e1ca}
+    *{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 80% -15%,#245462,transparent 40%),var(--bg);color:var(--text);font:15px/1.65 system-ui,-apple-system,sans-serif}
+    .wrap{width:min(920px,calc(100% - 32px));margin:44px auto}
+    a{color:var(--accent)}h1{font-size:clamp(30px,5vw,48px);letter-spacing:-.05em;margin:7px 0}h2{font-size:20px;margin:0}
+    p{color:var(--sub)}.eyebrow{color:var(--accent);letter-spacing:.14em;font-size:12px;font-weight:800;text-transform:uppercase}
+    .panel{border:1px solid var(--line);background:var(--card);border-radius:16px;padding:22px;margin-top:22px}
+    .fields{display:flex;flex-wrap:wrap;gap:12px;align-items:end}
+    label{display:grid;flex:1;gap:5px;color:var(--sub);font-size:13px}
+    input{width:100%;border:1px solid var(--line);border-radius:9px;background:#091827;color:var(--text);padding:11px;font-size:14px}
+    button{background:var(--accent);border:0;color:#0b1822;border-radius:9px;padding:11px 19px;font-size:14px;font-weight:800;cursor:pointer}
+    button:disabled{opacity:.6;cursor:not-allowed}
+    .status{padding:12px 15px;background:#0c2031;border-radius:10px;margin-top:15px;color:var(--sub);font-size:14px;overflow-wrap:anywhere}
+    .grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+    .metric{border:1px solid var(--line);background:#0c1c2c;border-radius:12px;padding:15px;min-width:0}
+    .metric .name{color:var(--sub);font-size:12px}.metric strong{display:block;font-size:18px;margin-top:4px;overflow-wrap:anywhere}
+    .table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;min-width:550px}
+    td,th{padding:12px 8px;text-align:left;border-bottom:1px solid var(--line);font-size:14px}
+    th{color:var(--sub);font-weight:600;font-size:12px}
+    .tiny{font-size:12px;color:var(--sub);overflow-wrap:anywhere}
+    .ok{color:var(--accent)}.error{color:#ffb5a2}
+    code{color:#bde5fc;overflow-wrap:anywhere}
+    @media(max-width:650px){.grid{grid-template-columns:1fr}.wrap{margin:26px auto}}
+  </style>
+</head>
+<body>
+<main class="wrap">
+  <div class="eyebrow">Tide / Solana Subscriptions / Local demo</div>
+  <h1>See the network your agent built.</h1>
+  <p>Read-only dashboard for <a href="network.tid">network.tid</a>. It connects to an actual Tide-launched Solana RPC and inspects the pinned Subscriptions program, the synthetic mint and three seeded wallets. No subscription transactions or billing plans are created by this demo.</p>
+  <section class="panel" aria-label="RPC connection">
+    <div class="fields">
+      <label>Local RPC endpoint<input id="rpc-url" type="url" value="http://127.0.0.1:28899" placeholder="http://127.0.0.1:28899" spellcheck="false"></label>
+      <button id="refresh" type="button">Refresh network</button>
+    </div>
+    <div class="status" role="status" aria-live="polite" id="status">Run the Tide environment, then select Refresh network.</div>
+  </section>
+  <section class="panel" aria-label="Network summary">
+    <h2>Network summary</h2>
+    <div class="grid" style="margin-top:17px">
+      <div class="metric"><div class="name">Current slot</div><strong id="slot">—</strong></div>
+      <div class="metric"><div class="name">Subscriptions program</div><strong id="program">—</strong></div>
+      <div class="metric"><div class="name">Synthetic USD supply</div><strong id="supply">—</strong></div>
+    </div>
+    <p class="tiny">Program ID: <code>De1egAFMkMWZSN5rYXRj9CAdheBamobVNubTsi9avR44</code></p>
+    <p class="tiny">Local mint: <code>3QF8grxkQDShQG9Cc5R4pqwUk4qNGgbyFcoJoYbsMNh8</code></p>
+  </section>
+  <section class="panel" aria-label="Wallet balances">
+    <h2>Test wallets</h2>
+    <p>Addresses are deterministically derived from Tide source. They are public fixture keys, unsafe for real funds.</p>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Role</th><th>Balance (SOL)</th><th>Balance (synthetic USD)</th></tr></thead>
+      <tbody><tr><td>Merchant</td><td id="merchant-sol">—</td><td id="merchant-usd">—</td></tr>
+        <tr><td>Alice</td><td id="alice-sol">—</td><td id="alice-usd">—</td></tr>
+        <tr><td>Bob</td><td id="bob-sol">—</td><td id="bob-usd">—</td></tr></tbody>
+    </table></div>
+    <p class="tiny">The merchant_sends_test_payment scenario transfers 25 synthetic USD from merchant to Alice; this table should reflect the result after Tide finishes its scenarios.</p>
+  </section>
+  <p class="tiny">This is an independent educational example, not affiliated with or endorsed by Solana Foundation. It is intentionally read-only. Serve locally with <code>python3 -m http.server 8000</code> from this directory; open <code>http://127.0.0.1:8000/demo.html</code>.</p>
+</main>
+<script>
+  const PROGRAM = "De1egAFMkMWZSN5rYXRj9CAdheBamobVNubTsi9avR44";
+  const MINT = "3QF8grxkQDShQG9Cc5R4pqwUk4qNGgbyFcoJoYbsMNh8";
+  const WALLETS = {
+    merchant: "67Q3CvfxnzF4okzka2wPttuLK9ry3s8nrJ9eLLceMw3P",
+    alice: "CtokGaf5tjhRjS3iUQfCujJUkzdZKi3NtUF3vKnPXNTi",
+    bob: "7uNsWTZN8adPdQ4mJLAcBmkjizqfBm9QT1fc2MMCn6Ut"
+  };
+  const get = id => document.getElementById(id);
+  async function call(url, method, params = []) {
+    const response = await fetch(url, {
+      method: "POST", headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({jsonrpc:"2.0",id:1,method,params})
+    });
+    if (!response.ok) throw Error(method + ": HTTP " + response.status);
+    const json = await response.json();
+    if (json.error) throw Error(method + ": " + json.error.message);
+    return json.result;
+  }
+  async function refresh() {
+    const button = get("refresh");
+    button.disabled = true;
+    get("status").textContent = "Reading Solana RPC…";
+    get("status").className = "status";
+    try {
+      const url = get("rpc-url").value.trim();
+      if (!/^https?:\/\//i.test(url)) throw Error("Enter an http(s) RPC URL.");
+      const [slot, program, supply] = await Promise.all([
+        call(url, "getSlot"),
+        call(url, "getAccountInfo", [PROGRAM, {encoding:"base64"}]),
+        call(url, "getTokenSupply", [MINT])
+      ]);
+      get("slot").textContent = new Intl.NumberFormat().format(slot);
+      get("program").textContent = program.value?.executable ? "Executable" : "Not found";
+      get("supply").textContent = supply.value?.uiAmountString ?? "—";
+      for (const [role,address] of Object.entries(WALLETS)) {
+        const [sol,token] = await Promise.all([
+          call(url, "getBalance", [address]),
+          call(url, "getTokenAccountsByOwner", [address, {mint:MINT}, {encoding:"jsonParsed"}])
+        ]);
+        get(role+"-sol").textContent = (sol.value / 1e9).toFixed(6);
+        const raw = token.value.reduce((sum,item) => sum + BigInt(item.account?.data?.parsed?.info?.tokenAmount?.amount ?? "0"), 0n);
+        const integer = raw/1000000n;
+        const fractional = (raw%1000000n).toString().padStart(6,"0").replace(/0+$/,"") || "0";
+        get(role+"-usd").textContent = integer.toString()+"."+fractional;
+      }
+      get("status").textContent = "Connected to the local network. Values are fetched directly from Solana RPC.";
+      get("status").className = "status ok";
+    } catch (err) {
+      get("status").textContent = "Could not read RPC: " + String(err.message || err) + ". Check tide up, the port, and browser CORS settings.";
+      get("status").className = "status error";
+    } finally {
+      button.disabled = false;
+    }
+  }
+  get("refresh").addEventListener("click", refresh);
+</script>
+</body></html>
