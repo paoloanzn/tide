@@ -6,6 +6,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdlib>
 #include <filesystem>
@@ -54,6 +55,12 @@ struct Args {
     std::vector<std::string> scenarios;
     bool no_scenarios = false, dry_run = false;
 };
+
+constexpr std::array<std::string_view, 3> valid_commands = {"check", "up", "down"};
+
+bool is_command_valid(std::string_view command) {
+    return std::ranges::find(valid_commands, command) != valid_commands.end();
+}
 
 // Where the value of option `opt` is stored, or nullptr if `opt` takes no
 // value. `--scenario` is repeatable, so each occurrence appends a new entry.
@@ -204,7 +211,7 @@ int main(int argc, char** argv) {
         std::cerr << "tide: " << err << "\n\n" << usage;
         return 2;
     }
-    if (args.command != "check" && args.command != "up" && args.command != "down") {
+    if (!is_command_valid(args.command)) {
         std::cerr << "tide: unknown command '" << args.command << "'\n\n" << usage;
         return 2;
     }
