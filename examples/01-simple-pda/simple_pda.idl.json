@@ -1,0 +1,35 @@
+{
+  "version": "0.1.0",
+  "name": "simple_pda",
+  "instructions": [
+    {
+      "name": "run",
+      "discriminator": [
+        203,
+        27,
+        228,
+        218,
+        208,
+        69,
+        35,
+        84
+      ],
+      "accounts": [
+        {
+          "name": "sender",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "custom",
+          "writable": true
+        },
+        {
+          "name": "systemProgram",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": []
+    }
+  ]
+}
