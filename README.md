@@ -85,6 +85,17 @@ delete the binary (`rm ~/.local/bin/tide`). For other platforms, build from
 source as described in
 [Architecture and contributing](docs/contributing/architecture.md#building-from-source).
 
+## Real Solana protocol examples
+
+Explore the [protocol gallery](examples/README.md): a pinned [Surfpool Simple PDA port](examples/01-simple-pda/), a [Solana Subscriptions development scaffold](examples/02-subscriptions/) and a [tokenized-vault case study](examples/03-vaults/). Each example documents its verification status and the original upstream program.
+
+A [standalone landing-page source](docs/index.html) is included for GitHub Pages deployment (repository Settings → Pages → Deploy from branch → main /docs after merging the gallery PR). Page hosting is **not** enabled by this file alone.
+
+```sh
+bash examples/verify.sh           # tide check on both new scripts
+bash examples/verify.sh --e2e     # requires pinned upstream program binaries + Solana CLI
+```
+
 ## Quick Start
 
 ### 1. A network with two funded accounts
