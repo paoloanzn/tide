@@ -3,7 +3,7 @@
 **Source:** [solana-foundation/subscriptions](https://github.com/solana-foundation/subscriptions/tree/0149b8c4fd362c1f02b1de6a4a5edfe14c724fba)  
 **Pinned upstream commit:** `0149b8c4fd362c1f02b1de6a4a5edfe14c724fba`  
 **License:** MIT (upstream program)  
-**Status:** Draft fixture; **not yet independently run**. **No subscription instruction is executed by this Tide file yet.**
+**Status:** `tide check` passed on Linux and macOS ([CI run](https://github.com/paoloanzn/tide/actions/runs/41859558611)); **runtime validation with the compiled upstream binary is pending**. **No subscription instruction is executed by this Tide file yet.**
 
 This repository contains a real Pinocchio subscriptions program, TypeScript/Rust clients and a React webapp. Its original development flows use Surfpool runbooks and, for the webapp, `solana-test-validator`.
 
