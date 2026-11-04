@@ -73,6 +73,11 @@
     footer { margin-top:54px; padding:24px 0 38px; border-top:1px solid var(--line); display:flex; justify-content:space-between; gap:22px; flex-wrap:wrap; color:var(--muted); font-size:13px; }
     @media(max-width:780px) { .hero { padding:62px 0 48px; } .grid, .features { grid-template-columns:1fr; } .tile { min-height:auto; } .section { padding:46px 0; } .nav-links { gap:12px; } .workbench-top { flex-direction:column; align-items:flex-start; } }
     @media(prefers-reduced-motion:reduce) { html {scroll-behavior:auto;} }
+    .comparison { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; }
+    .compare-pane { overflow:hidden; background:#0b1828; border:1px solid var(--line); border-radius:var(--radius); }
+    .compare-pane h3 { padding:16px 20px; font-size:17px; margin:0; border-bottom:1px solid var(--line); }
+    .compare-pane pre { min-height:250px; padding:18px 20px; font-size:12px; }
+    @media(max-width:780px) { .comparison { grid-template-columns:1fr; } }
   </style>
 </head>
 <body>
@@ -172,6 +177,48 @@ genesis {
       </div>
     </section>
 
+    <section class="section" id="comparison">
+      <div class="section-head"><div class="eyebrow">One source, two workflows</div>
+        <h2>How does the setup read?</h2>
+        <p class="desc">From the same upstream Anchor Simple PDA example: Surfpool txtx runbooks and a Tide network program. Excerpts show the mental models, not a performance comparison.</p></div>
+      <div class="comparison">
+        <div class="compare-pane"><h3>Surfpool + txtx · excerpts</h3><pre><code>// deployment runbook
+action "deploy_simple_pda" "svm::deploy_program" {
+  program = svm::get_program_from_anchor_project("simple_pda")
+  authority = signer.authority
+  payer = signer.payer
+}
+
+// call runbook (separate file)
+action "call" "svm::process_instructions" {
+  signers = [signer.caller]
+  instruction {
+    program_idl = variable.program.idl
+    instruction_name = "run"
+    sender { public_key = signer.caller.public_key }
+  }
+}</code></pre></div>
+        <div class="compare-pane"><h3>Tide · excerpt</h3><pre><code>network simple_pda {
+  genesis {
+    program simple_pda {
+      id = PROGRAM;
+      binary = "upstream/.../simple_pda.so";
+    }
+  }
+  bootstrap {
+    invoke PROGRAM with {
+      method = "run";
+      accounts = { sender: caller.pubkey, custom: custom };
+      signers = [caller];
+    };
+  }
+  scenario initialized {
+    assert decode(CustomAccount, account_info(custom).data).counter == 1;
+  }
+}</code></pre></div>
+      </div>
+      <p class="hint">Both workflows require a compiled binary. The upstream runbook deploys; Tide preloads at genesis. The full Tide file additionally includes the IDL and system-program account. See the <a href="https://github.com/paoloanzn/tide/blob/main/examples/01-simple-pda/COMPARISON.md">comparison methodology</a>.</p>
+    </section>
     <section class="section" id="environments">
       <div class="section-head">
         <div class="eyebrow">Open-source protocol gallery</div>
