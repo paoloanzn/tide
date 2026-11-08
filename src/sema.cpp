@@ -261,66 +261,84 @@ std::vector<const ast::NetworkDecl*> Program::networks() const {
 
 namespace {
 
-enum class Effect : std::uint8_t { pure, state, runtime_only };
+// The kinds of network operation a builtin, statement or function can perform,
+// and where each is allowed:
+//   read  - query state (balance, ...)                    genesis, bootstrap, scenario
+//   write - genesis declarations (account, mint, ...)     genesis
+//   send  - runtime statements (transaction, invoke, ...) bootstrap, scenario
+//   live  - needs a running network (slot, epoch, await)  bootstrap, scenario
+// A function performs what its body does, including through the functions it calls.
+enum class Op : std::uint8_t { read, write, send, live };
+constexpr std::size_t op_count = 4;
+constexpr std::optional<Op> pure;
+
+// Where a function performs one kind of operation: the statement or builtin
+// itself, or a call to a function that performs it.
+struct OpSite {
+    Loc loc;
+    std::string what;             // statement or builtin name, or the callee as written
+    const Symbol* via = nullptr;  // the callee, when reached through a call
+};
+using OpSites = std::array<std::optional<OpSite>, op_count>;
 
 struct BuiltinDef {
     std::string_view name;
     BuiltinId id;
-    Effect effect;
+    std::optional<Op> op;
 };
 
 constexpr auto builtin_table = std::to_array<BuiltinDef>({
-    {"seed", BuiltinId::seed, Effect::pure},
-    {"keypair_file", BuiltinId::keypair_file, Effect::pure},
-    {"pubkey", BuiltinId::pubkey, Effect::pure},
-    {"pda", BuiltinId::pda, Effect::pure},
-    {"pda_bump", BuiltinId::pda_bump, Effect::pure},
-    {"ata", BuiltinId::ata, Effect::pure},
-    {"system_program", BuiltinId::system_program, Effect::pure},
-    {"token_program", BuiltinId::token_program, Effect::pure},
-    {"token_2022_program", BuiltinId::token_2022_program, Effect::pure},
-    {"associated_token_program", BuiltinId::associated_token_program, Effect::pure},
-    {"bpf_loader", BuiltinId::bpf_loader, Effect::pure},
-    {"bpf_loader_deprecated", BuiltinId::bpf_loader_deprecated, Effect::pure},
-    {"bpf_upgradeable_loader", BuiltinId::bpf_upgradeable_loader, Effect::pure},
-    {"loader_v4", BuiltinId::loader_v4, Effect::pure},
-    {"memo_program", BuiltinId::memo_program, Effect::pure},
-    {"compute_budget_program", BuiltinId::compute_budget_program, Effect::pure},
-    {"address_lookup_table_program", BuiltinId::address_lookup_table_program, Effect::pure},
-    {"hex", BuiltinId::hex, Effect::pure},
-    {"base64", BuiltinId::base64, Effect::pure},
-    {"base58", BuiltinId::base58, Effect::pure},
-    {"utf8", BuiltinId::utf8, Effect::pure},
-    {"sha256", BuiltinId::sha256, Effect::pure},
-    {"file", BuiltinId::file, Effect::pure},
-    {"u8", BuiltinId::u8, Effect::pure},
-    {"u16_le", BuiltinId::u16_le, Effect::pure},
-    {"u32_le", BuiltinId::u32_le, Effect::pure},
-    {"u64_le", BuiltinId::u64_le, Effect::pure},
-    {"i64_le", BuiltinId::i64_le, Effect::pure},
-    {"borsh", BuiltinId::borsh, Effect::pure},
-    {"anchor", BuiltinId::anchor, Effect::pure},
-    {"decode", BuiltinId::decode, Effect::pure},
-    {"len", BuiltinId::len, Effect::pure},
-    {"str", BuiltinId::str, Effect::pure},
-    {"print", BuiltinId::print, Effect::pure},
-    {"rent_exempt", BuiltinId::rent_exempt, Effect::pure},
-    {"rpc", BuiltinId::rpc, Effect::pure},
-    {"readonly", BuiltinId::readonly, Effect::pure},
-    {"writable", BuiltinId::writable, Effect::pure},
-    {"signer", BuiltinId::signer, Effect::pure},
-    {"sol", BuiltinId::sol, Effect::pure},
-    {"system_transfer", BuiltinId::system_transfer, Effect::pure},
-    {"spl_transfer", BuiltinId::spl_transfer, Effect::pure},
-    {"spl_transfer_checked", BuiltinId::spl_transfer_checked, Effect::pure},
-    {"spl_mint_to", BuiltinId::spl_mint_to, Effect::pure},
-    {"memo", BuiltinId::memo, Effect::pure},
-    {"balance", BuiltinId::balance, Effect::state},
-    {"token_balance", BuiltinId::token_balance, Effect::state},
-    {"account_info", BuiltinId::account, Effect::state},
-    {"exists", BuiltinId::exists, Effect::state},
-    {"slot", BuiltinId::slot, Effect::runtime_only},
-    {"epoch", BuiltinId::epoch, Effect::runtime_only},
+    {"seed", BuiltinId::seed, pure},
+    {"keypair_file", BuiltinId::keypair_file, pure},
+    {"pubkey", BuiltinId::pubkey, pure},
+    {"pda", BuiltinId::pda, pure},
+    {"pda_bump", BuiltinId::pda_bump, pure},
+    {"ata", BuiltinId::ata, pure},
+    {"system_program", BuiltinId::system_program, pure},
+    {"token_program", BuiltinId::token_program, pure},
+    {"token_2022_program", BuiltinId::token_2022_program, pure},
+    {"associated_token_program", BuiltinId::associated_token_program, pure},
+    {"bpf_loader", BuiltinId::bpf_loader, pure},
+    {"bpf_loader_deprecated", BuiltinId::bpf_loader_deprecated, pure},
+    {"bpf_upgradeable_loader", BuiltinId::bpf_upgradeable_loader, pure},
+    {"loader_v4", BuiltinId::loader_v4, pure},
+    {"memo_program", BuiltinId::memo_program, pure},
+    {"compute_budget_program", BuiltinId::compute_budget_program, pure},
+    {"address_lookup_table_program", BuiltinId::address_lookup_table_program, pure},
+    {"hex", BuiltinId::hex, pure},
+    {"base64", BuiltinId::base64, pure},
+    {"base58", BuiltinId::base58, pure},
+    {"utf8", BuiltinId::utf8, pure},
+    {"sha256", BuiltinId::sha256, pure},
+    {"file", BuiltinId::file, pure},
+    {"u8", BuiltinId::u8, pure},
+    {"u16_le", BuiltinId::u16_le, pure},
+    {"u32_le", BuiltinId::u32_le, pure},
+    {"u64_le", BuiltinId::u64_le, pure},
+    {"i64_le", BuiltinId::i64_le, pure},
+    {"borsh", BuiltinId::borsh, pure},
+    {"anchor", BuiltinId::anchor, pure},
+    {"decode", BuiltinId::decode, pure},
+    {"len", BuiltinId::len, pure},
+    {"str", BuiltinId::str, pure},
+    {"print", BuiltinId::print, pure},
+    {"rent_exempt", BuiltinId::rent_exempt, pure},
+    {"rpc", BuiltinId::rpc, pure},
+    {"readonly", BuiltinId::readonly, pure},
+    {"writable", BuiltinId::writable, pure},
+    {"signer", BuiltinId::signer, pure},
+    {"sol", BuiltinId::sol, pure},
+    {"system_transfer", BuiltinId::system_transfer, pure},
+    {"spl_transfer", BuiltinId::spl_transfer, pure},
+    {"spl_transfer_checked", BuiltinId::spl_transfer_checked, pure},
+    {"spl_mint_to", BuiltinId::spl_mint_to, pure},
+    {"memo", BuiltinId::memo, pure},
+    {"balance", BuiltinId::balance, Op::read},
+    {"token_balance", BuiltinId::token_balance, Op::read},
+    {"account_info", BuiltinId::account, Op::read},
+    {"exists", BuiltinId::exists, Op::read},
+    {"slot", BuiltinId::slot, Op::live},
+    {"epoch", BuiltinId::epoch, Op::live},
 });
 
 const BuiltinDef* find_builtin(std::string_view name) {
@@ -744,9 +762,13 @@ private:
         for (auto& p : f.params) sym->param_types.push_back(resolve_type(p.type, false));
         sym->return_type = f.ret ? resolve_type(*f.ret, false) : types_.void_();
 
+        // The body may do anything; what it does decides where the function can be called.
+        OpSites ops;
         {
             const Restore in_function(ctx_, Ctx::function);
             const Restore current(function_, static_cast<const Symbol*>(sym));
+            const Restore recording(body_ops_, &ops);
+            const Restore own_labels(program_labels_, std::map<std::string, Loc>{});
             const Restore no_loops(loop_depth_, 0);
             const ScopeGuard g(*this);
             for (std::size_t i = 0; i < f.params.size(); ++i) {
@@ -759,6 +781,102 @@ private:
             diags_.error(f.name.loc, "function '" + f.name.name +
                                          "' may reach the end of its body without returning a " +
                                          to_string(sym->return_type));
+        // A function only sees functions declared before it, plus itself, so its
+        // callees' operations are already known and a self-call adds nothing new.
+        if (!report_uncallable(*sym, ops)) fn_ops_[sym] = std::move(ops);
+    }
+
+    // ------------------------------------------------- network operations --
+
+    static constexpr std::size_t op_index(Op op) { return static_cast<std::size_t>(op); }
+
+    static bool op_allowed(Op op, Ctx c) {
+        switch (op) {
+            case Op::read: return c == Ctx::genesis || c == Ctx::runtime;
+            case Op::write: return c == Ctx::genesis;
+            case Op::send:
+            case Op::live: return c == Ctx::runtime;
+        }
+        return false;
+    }
+
+    static const char* op_verb(Op op) {
+        switch (op) {
+            case Op::read: return "reads network state";
+            case Op::write: return "declares genesis state";
+            case Op::send: return "sends a transaction";
+            case Op::live: return "needs a running network";
+        }
+        return "";
+    }
+
+    static const char* op_places(Op op) {
+        switch (op) {
+            case Op::read: return "genesis, bootstrap or scenario blocks";
+            case Op::write: return "genesis";
+            case Op::send:
+            case Op::live: return "bootstrap or scenario blocks";
+        }
+        return "";
+    }
+
+    // Inside a function body, records that the function performs `op` at `loc`
+    // (the first site of each kind is kept). Elsewhere returns false: the caller
+    // checks that `op` is allowed where it appears.
+    bool record_op(Op op, Loc loc, std::string what, const Symbol* via = nullptr) {
+        if (ctx_ != Ctx::function) return false;
+        auto& site = body_ops_->at(op_index(op));
+        if (!site) site = OpSite{loc, std::move(what), via};
+        return true;
+    }
+
+    // Notes from `fn` down to the line that performs `op`: one per call, then the line.
+    void explain_op(Diagnostic& d, const Symbol& fn, const OpSite& site, Op op) const {
+        const Symbol* caller = &fn;
+        const OpSite* s = &site;
+        while (s->via) {
+            d.notes.emplace_back(s->loc, "'" + caller->name + "' calls '" + s->what + "' here");
+            caller = s->via;
+            const auto& next = fn_ops_.at(caller).at(op_index(op));
+            if (!next) return;  // unreachable: a call records only operations its callee performs
+            s = &*next;
+        }
+        d.notes.emplace_back(s->loc, "'" + s->what + "' " + op_verb(op) + " here");
+    }
+
+    // A call performs everything the callee does, so it is allowed only where all of it is.
+    void check_call_ops(const Expr& e, const Symbol& fn, const std::string& fn_name) {
+        const auto it = fn_ops_.find(&fn);
+        if (it == fn_ops_.end()) return;  // a self-call, or already reported at the definition
+        for (std::size_t i = 0; i < op_count; ++i) {
+            const auto& site = it->second.at(i);
+            const Op op = static_cast<Op>(i);
+            if (!site || record_op(op, e.loc, fn_name, &fn) || op_allowed(op, ctx_)) continue;
+            const bool too_early = ctx_ == Ctx::genesis && (op == Op::send || op == Op::live);
+            std::string msg = "'" + fn_name + "' " + op_verb(op);
+            if (too_early)
+                msg += " and cannot be called in genesis, where no network is running yet";
+            else
+                msg += std::string(" and can only be called inside ") + op_places(op);
+            explain_op(diags_.error(e.loc, std::move(msg)), fn, *site, op);
+            return;
+        }
+    }
+
+    // Genesis runs before the network starts, so a function that both declares
+    // genesis state and needs the running network fits nowhere.
+    bool report_uncallable(const Symbol& fn, const OpSites& ops) {
+        const auto& write = ops.at(op_index(Op::write));
+        const Op runtime_op = ops.at(op_index(Op::send)) ? Op::send : Op::live;
+        const auto& runtime = ops.at(op_index(runtime_op));
+        if (!write || !runtime) return false;
+        auto& d =
+            diags_.error(fn.loc, "function '" + fn.name + "' " + op_verb(Op::write) + " and " + op_verb(runtime_op) +
+                                     ", so it cannot be called anywhere: genesis declarations are only "
+                                     "allowed in genesis, where no network is running yet");
+        explain_op(d, fn, *write, Op::write);
+        explain_op(d, fn, *runtime, runtime_op);
+        return true;
     }
 
     static bool block_terminates(const Block& b) {
@@ -1495,6 +1613,7 @@ private:
             expect(*c.args[i], fn.param_types[i],
                    "argument " + std::to_string(i + 1) + " ('" + fn.function->params[i].name.name + "') of '" +
                        fn_name + "'");
+        check_call_ops(e, fn, fn_name);
         return fn.return_type;
     }
 
@@ -1566,13 +1685,14 @@ private:
         return nullptr;
     }
 
-    // Effects first: some builtins need network state.
-    void check_builtin_effect(const Expr& e, const BuiltinDef& b) {
-        if (b.effect == Effect::state && ctx_ != Ctx::genesis && ctx_ != Ctx::runtime)
+    // Operations first: some builtins need network state.
+    void check_builtin_op(const Expr& e, const BuiltinDef& b) {
+        if (!b.op || record_op(*b.op, e.loc, std::string(b.name))) return;
+        if (*b.op == Op::read && !op_allowed(Op::read, ctx_))
             diags_.error(e.loc,
                          "'" + std::string(b.name) +
                              "' reads network state and can only be used inside genesis, bootstrap or scenario blocks");
-        if (b.effect == Effect::runtime_only && ctx_ != Ctx::runtime)
+        if (*b.op == Op::live && !op_allowed(Op::live, ctx_))
             diags_.error(e.loc,
                          "'" + std::string(b.name) +
                              "' needs a running network and can only be used inside bootstrap or scenario blocks");
@@ -1662,7 +1782,7 @@ private:
     }
 
     const Type* check_builtin(Expr& e, CallExpr& c, const BuiltinDef& b) {
-        check_builtin_effect(e, b);
+        check_builtin_op(e, b);
         auto unary = [&](const Type* param, const Type* ret) {
             if (arity(e, c, b, 1, 1)) expect(*c.args[0], param, arg_desc(b, 0));
             return ret;
@@ -1776,14 +1896,15 @@ private:
     }
 
     bool require_genesis(const Stmt& s, const char* what) {
-        if (ctx_ == Ctx::genesis) return true;
+        if (record_op(Op::write, s.loc, what) || ctx_ == Ctx::genesis) return true;
         diags_.error(s.loc, std::string("'") + what + "' declarations are only allowed inside genesis (found " +
                                 ctx_name(ctx_) + ")");
         return false;
     }
 
-    bool require_runtime(const Stmt& s, const char* what) {
-        if (ctx_ == Ctx::runtime) return true;
+    // `op` is send for statements that submit transactions, live for those that only need the network running.
+    bool require_runtime(const Stmt& s, const char* what, Op op) {
+        if (record_op(op, s.loc, what) || ctx_ == Ctx::runtime) return true;
         const std::string hint =
             ctx_ == Ctx::genesis ? "; genesis builds state directly, use declarations such as 'account' instead" : "";
         diags_.error(s.loc, std::string("'") + what +
@@ -1831,17 +1952,17 @@ private:
                        },
                        [&](TransactionStmt& t) { check_transaction(s, t); },
                        [&](InvokeStmt& i) {
-                           require_runtime(s, "invoke");
+                           require_runtime(s, "invoke", Op::send);
                            expect(*i.program, types_.pubkey(), "invoked program");
                            check_block(i.with, {"invoke", invoke_fields});
                        },
                        [&](DeployStmt& d) {
-                           require_runtime(s, "deploy");
+                           require_runtime(s, "deploy", Op::send);
                            expect(*d.program, types_.keypair(), "deployed program (its keypair is the program id)");
                            expect(*d.from, types_.string(), "program binary path");
                        },
                        [&](AirdropStmt& a) {
-                           require_runtime(s, "airdrop");
+                           require_runtime(s, "airdrop", Op::send);
                            expect(*a.to, types_.pubkey(), "airdrop recipient");
                            expect(*a.amount, types_.int_(IntWidth::u64), "airdrop amount");
                        },
@@ -1849,7 +1970,7 @@ private:
                        [&](SnapshotStmt& sn) { check_snapshot_control(s, *sn.name, "snapshot"); },
                        [&](RestoreStmt& r) { check_snapshot_control(s, *r.name, "restore"); },
                        [&](AwaitStmt& a) {
-                           require_runtime(s, "await");
+                           require_runtime(s, "await", Op::live);
                            expect(*a.cond, types_.bool_(), "await condition");
                        },
                    },
@@ -1920,7 +2041,7 @@ private:
     }
 
     void check_warp(const Stmt& s, WarpStmt& w) {
-        if (!require_runtime(s, "warp")) return;
+        if (!require_runtime(s, "warp", Op::live)) return;
         if (w.kind == WarpKind::to_time) {
             value_type(*w.value, "warp time");
         } else {
@@ -1931,7 +2052,7 @@ private:
 
     // snapshot/restore: both take a snapshot name and are reserved for now.
     void check_snapshot_control(const Stmt& s, Expr& name, const char* what) {
-        if (!require_runtime(s, what)) return;
+        if (!require_runtime(s, what, Op::live)) return;
         expect(name, types_.string(), "snapshot name");
         reserved_feature(s, what);
     }
@@ -2131,7 +2252,7 @@ private:
     }
 
     void check_transaction(Stmt& s, TransactionStmt& t) {
-        require_runtime(s, "transaction");
+        require_runtime(s, "transaction", Op::send);
         std::map<std::string, Loc> seen;
         std::vector<std::string> keys;
         keys.reserve(tx_fields.size());
@@ -2266,6 +2387,8 @@ private:
     Ctx ctx_ = Ctx::top_level;
     int loop_depth_ = 0;
     const Symbol* function_ = nullptr;
+    OpSites* body_ops_ = nullptr;              // operations of the function body being checked
+    std::map<const Symbol*, OpSites> fn_ops_;  // operations of every checked function (absent: uncallable)
     std::map<std::string, Loc> program_labels_;
     std::map<std::filesystem::path, Module*> loaded_;
     std::set<std::filesystem::path> in_progress_;
