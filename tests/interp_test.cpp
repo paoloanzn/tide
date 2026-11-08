@@ -575,6 +575,79 @@ TEST_CASE("await polls state queries", "[interp]") {
     CHECK(r->backend.current_slot >= 4);
 }
 
+TEST_CASE("operations inside functions reach the backend like direct statements", "[interp]") {
+    const std::string decls = R"(
+        keypair a = seed("a");
+        keypair b = seed("b");
+        fn pay(from: keypair, to: pubkey) -> bool {
+          transaction as tx {
+            signers = [from];
+            instruction system_program() { accounts = [from.pubkey, to]; data = system_transfer(5); }
+          }
+          return tx.success;
+        }
+        fn drip(to: pubkey, n: int) { if n > 0 { airdrop to amount 1 SOL; drip(to, n - 1); } }
+    )";
+    auto via_fns = run(decls + R"(network n {
+        bootstrap { assert pay(a, b.pubkey); drip(b.pubkey, 2); }
+        scenario s { assert pay(a, b.pubkey); }
+    })");
+    auto direct = run(decls + R"(network n {
+        bootstrap {
+          transaction { signers = [a]; instruction system_program() { accounts = [a.pubkey, b.pubkey]; data = system_transfer(5); } }
+          airdrop b.pubkey amount 1 SOL;
+          airdrop b.pubkey amount 1 SOL;
+        }
+        scenario s {
+          transaction { signers = [a]; instruction system_program() { accounts = [a.pubkey, b.pubkey]; data = system_transfer(5); } }
+        }
+    })");
+    INFO(via_fns->dump());
+    REQUIRE(via_fns->result.ok);
+    REQUIRE(direct->result.ok);
+    CHECK(via_fns->result.scenarios_failed == 0);
+    CHECK(via_fns->backend.events == direct->backend.events);
+    REQUIRE(via_fns->backend.txs.size() == 2);
+    REQUIRE(direct->backend.txs.size() == 2);
+    for (std::size_t i = 0; i < 2; ++i) {
+        CHECK(via_fns->backend.txs[i].fee_payer == direct->backend.txs[i].fee_payer);
+        CHECK(via_fns->backend.txs[i].instructions[0].data == direct->backend.txs[i].instructions[0].data);
+    }
+    CHECK(via_fns->backend.accounts.at(pk("b")).lamports == 2'000'000'000);
+}
+
+TEST_CASE("functions declare genesis state and read it back", "[interp]") {
+    const fs::path dir = temp_dir("tide_fn_genesis_test");
+    std::ofstream(dir / "vault.so") << "not really elf";
+    const std::string decls =
+        "keypair a = seed(\"a\");\n"
+        "fn fund(who: pubkey, amount: u64) { account who { lamports = amount; } }\n"
+        "fn lamports_of(who: pubkey) -> u64 { return balance(who); }\n"
+        "fn add_vault(id: pubkey) { program vault { id = id; binary = \"" +
+        (dir / "vault.so").string() + "\"; } }\n";
+    auto r = run(decls + R"(network n { genesis {
+        fund(a.pubkey, 3 SOL);
+        assert lamports_of(a.pubkey) == 3 SOL;
+        add_vault(seed("p1").pubkey);
+        add_vault(seed("p2").pubkey);
+    } })");
+    INFO(r->dump());
+    REQUIRE(r->result.ok);
+    CHECK(r->backend.accounts.at(pk("a")).lamports == 3'000'000'000);
+    // Two programs may share a label; it only names them in messages.
+    REQUIRE(r->backend.programs.size() == 2);
+    CHECK(r->backend.programs[0].name == "vault");
+    CHECK(r->backend.programs[1].name == "vault");
+    CHECK(r->backend.programs[0].id == pk("p1"));
+    CHECK(r->backend.programs[1].id == pk("p2"));
+
+    // The same address twice is still an error, reported at the declaration inside the function.
+    auto dup = run(decls + R"(network n { genesis { add_vault(seed("p1").pubkey); add_vault(seed("p1").pubkey); } })");
+    CHECK_FALSE(dup->result.ok);
+    CHECK(dup->has("is already defined in genesis (as program 'vault')"));
+    fs::remove_all(dir);
+}
+
 // -------------------------------------------------------------- language --
 
 TEST_CASE("functions, recursion and control flow", "[interp]") {
