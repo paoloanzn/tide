@@ -60,6 +60,16 @@ struct Compiled {
             return line < 0 || (d.loc && static_cast<int>(sm.locate(d.loc.ptr).line) == line);
         });
     }
+
+    // True if some error carries a note containing `text` on `line`.
+    [[nodiscard]] bool has_note(std::string_view text, int line) const {
+        return std::ranges::any_of(diags.all(), [&](const auto& d) {
+            return std::ranges::any_of(d.notes, [&](const auto& n) {
+                return n.second.find(text) != std::string::npos && n.first &&
+                       static_cast<int>(sm.locate(n.first.ptr).line) == line;
+            });
+        });
+    }
 };
 
 std::unique_ptr<Compiled> compile(const std::string& src, fs::path path = "test.tid") {
@@ -298,18 +308,108 @@ TEST_CASE("statement contexts are enforced", "[sema]") {
               ->has("'airdrop' is a runtime statement and is only allowed inside bootstrap or scenario"));
     CHECK(compile("network n { bootstrap { account seed(\"a\").pubkey { lamports = 1; } } }")
               ->has("'account' declarations are only allowed inside genesis"));
-    CHECK(compile("fn f() { mint seed(\"a\").pubkey { decimals = 1; } }")->has("only allowed inside genesis"));
     CHECK(compile("network n { genesis { return; } }")->has("'return' outside of a function"));
     CHECK(compile("network n { genesis { break; } }")->has("'break' outside of a loop"));
     CHECK(compile("network n { genesis { keypair k = seed(\"k\"); } }")
               ->has("only allowed at top level or directly inside a network"));
-    CHECK(compile("fn f() -> int { return balance(seed(\"a\").pubkey); }")->has("reads network state"));
     CHECK(compile("let b = balance(seed(\"a\").pubkey);")->has("reads network state"));
     CHECK(compile("network n { genesis { let b = balance(seed(\"a\").pubkey); } }")->ok());
     CHECK(compile("network n { genesis { let s = slot(); } }")->has("needs a running network"));
     CHECK(compile("network n { options { faucet_sol = balance(seed(\"a\").pubkey); } }")->has("reads network state"));
     CHECK(compile("network n { scenario s { let s2 = slot(); await slot() > 10; } }")->ok());
     CHECK(compile("network n { genesis { 1 + 2; } }")->has("expression result is unused", -1, Severity::warning));
+}
+
+TEST_CASE("functions can be called wherever everything they do is allowed", "[sema]") {
+    const std::string fns = R"(keypair k = seed("k");
+fn reads() -> u64 { return balance(k.pubkey); }
+fn writes() { mint k.pubkey { decimals = 6; } }
+fn sends() { airdrop k.pubkey amount 1 SOL; }
+fn waits() { await slot() > 1; }
+fn pure_fn(n: int) -> int { return n + 1; }
+)";
+    auto in = [&](const std::string& block, const std::string& body) {
+        return compile(fns + "network n { " + block + " {\n" + body + "\n} }");
+    };
+    // Bodies may now contain any operation; only the call sites are checked.
+    CHECK(compile(fns)->ok());
+    CHECK(in("genesis", "let b = reads(); writes(); let p = pure_fn(1);")->ok());
+    CHECK(in("bootstrap", "let b = reads(); sends(); waits();")->ok());
+    CHECK(in("scenario s", "let b = reads(); sends(); waits();")->ok());
+    CHECK(compile(fns + "let top = pure_fn(1);\nnetwork n { let net = pure_fn(2); }")->ok());
+
+    // Each kind of operation is rejected where it is not allowed, at the call and with the responsible line.
+    auto bad = in("genesis", "sends();");
+    CHECK(bad->has("'sends' sends a transaction and cannot be called in genesis, where no network is running yet", 8));
+    CHECK(bad->has_note("'airdrop' sends a transaction here", 4));
+    auto early = in("genesis", "waits();");
+    CHECK(early->has("'waits' needs a running network and cannot be called in genesis", 8));
+    CHECK(early->has_note("'await' needs a running network here", 5));
+    auto late = in("bootstrap", "writes();");
+    CHECK(late->has("'writes' declares genesis state and can only be called inside genesis", 8));
+    CHECK(late->has_note("'mint' declares genesis state here", 3));
+    auto top = compile(fns + "let b = reads();");
+    CHECK(top->has("'reads' reads network state and can only be called inside genesis, bootstrap or scenario", 7));
+    CHECK(top->has_note("'balance' reads network state here", 2));
+    CHECK(compile(fns + "network n { let b = reads(); }")->has("'reads' reads network state"));
+    CHECK(compile(fns + "network n { options { faucet_sol = reads(); } }")->has("'reads' reads network state"));
+}
+
+TEST_CASE("operations add up through calls and are explained along the call chain", "[sema]") {
+    const std::string fns = R"(keypair k = seed("k");
+fn deposit() { airdrop k.pubkey amount 1 SOL; }
+fn check() -> bool { return balance(k.pubkey) > 0; }
+fn setup() {
+  deposit();
+  assert check();
+}
+fn outer() { setup(); }
+)";
+    CHECK(compile(fns + "network n { bootstrap { outer(); } scenario s { setup(); } }")->ok());
+    auto c = compile(fns + "network n { genesis {\nouter();\n} }");
+    CHECK(c->has("'outer' sends a transaction and cannot be called in genesis", 10));
+    CHECK(c->has_note("'outer' calls 'setup' here", 8));
+    CHECK(c->has_note("'setup' calls 'deposit' here", 5));
+    CHECK(c->has_note("'airdrop' sends a transaction here", 2));
+    // Only the first violated kind is reported, once.
+    CHECK(c->diags.error_count() == 1);
+    CHECK(compile(fns + "let x = outer();")->has("'outer' reads network state"));
+
+    // Recursion does not loop the analysis, and a recursive function still carries its operations.
+    const std::string rec =
+        "keypair k = seed(\"k\");\nfn drip(n: int) { if n > 0 { airdrop k.pubkey amount 1; drip(n - 1); } }\n";
+    CHECK(compile(rec + "network n { bootstrap { drip(3); } }")->ok());
+    CHECK(compile(rec + "network n { genesis { drip(3); } }")->has("'drip' sends a transaction"));
+}
+
+TEST_CASE("functions that both declare genesis state and need the network are rejected at the definition", "[sema]") {
+    auto c = compile(R"(keypair k = seed("k");
+fn seed_it() { mint k.pubkey { decimals = 6; } }
+fn both() {
+  seed_it();
+  airdrop k.pubkey amount 1;
+}
+network n { genesis { both(); } bootstrap { both(); } }
+)");
+    CHECK(c->has("function 'both' declares genesis state and sends a transaction, so it cannot be called anywhere", 3));
+    CHECK(c->has_note("'both' calls 'seed_it' here", 4));
+    CHECK(c->has_note("'mint' declares genesis state here", 2));
+    CHECK(c->has_note("'airdrop' sends a transaction here", 5));
+    // Its call sites add nothing: the definition already explains the problem.
+    CHECK(c->diags.error_count() == 1);
+    CHECK(compile("fn f() { account seed(\"a\").pubkey { lamports = 1; } let s = slot(); }")
+              ->has("declares genesis state and needs a running network"));
+}
+
+TEST_CASE("program labels are unique per body, not across function calls", "[sema]") {
+    const std::string fn = "fn add(id: pubkey) { program vault { id = id; binary = \"v.so\"; } }\n";
+    CHECK(compile(fn + "network n { genesis { add(seed(\"a\").pubkey); add(seed(\"b\").pubkey); } }")->ok());
+    CHECK(compile(fn + "network n { genesis { add(seed(\"a\").pubkey);\n"
+                       "program vault { id = seed(\"b\").pubkey; binary = \"v.so\"; } } }")
+              ->ok());
+    CHECK(compile("fn f(a: pubkey, b: pubkey) { program p { id = a; binary = \"x.so\"; } "
+                  "program p { id = b; binary = \"x.so\"; } }")
+              ->has("duplicate program 'p'"));
 }
 
 TEST_CASE("network structure validation", "[sema]") {
@@ -407,5 +507,27 @@ TEST_CASE("imports resolve module members and detect cycles", "[sema]") {
     CHECK(compile_file(dir / "typo.tid")->has("module 'lib' has no member 'admn'; did you mean 'admin'?"));
     CHECK(compile_file(dir / "a.tid")->has("import cycle"));
     CHECK(compile_file(dir / "missing.tid")->has("cannot open imported file"));
+    fs::remove_all(dir);
+}
+
+TEST_CASE("library functions carry their operations across modules", "[sema]") {
+    const fs::path dir = fs::temp_directory_path() / "tide_import_ops_test";
+    fs::create_directories(dir);
+    std::ofstream(dir / "vault.tid") << "fn deposit(user: keypair, amount: u64) {\n"
+                                        "  airdrop user.pubkey amount amount;\n"
+                                        "}\n";
+    std::ofstream(dir / "dev.tid") << "import \"vault.tid\" as vault;\n"
+                                      "keypair bob = seed(\"bob\");\n"
+                                      "network n {\n"
+                                      "  bootstrap { vault.deposit(bob, 50000000); }\n"
+                                      "  scenario s { vault.deposit(bob, 1); }\n"
+                                      "  genesis {\n"
+                                      "    vault.deposit(bob, 1);\n"
+                                      "  }\n"
+                                      "}\n";
+    auto c = compile_file(dir / "dev.tid");
+    CHECK(c->has("'vault.deposit' sends a transaction and cannot be called in genesis", 7));
+    CHECK(c->has_note("'airdrop' sends a transaction here", 2));
+    CHECK(c->diags.error_count() == 1);
     fs::remove_all(dir);
 }
