@@ -225,7 +225,8 @@ The resulting `sema::Program` owns the type arena (`TypeContext`), all symbols, 
 
 Two tables in `sema.cpp` drive most validation:
 
-- **`builtin_table`** maps each standard-library name to a `BuiltinId` and an `Effect`: `pure`, `state` (reads network state; only in genesis, bootstrap or scenario) or `runtime_only` (needs a running network; only in bootstrap or scenario). `check_builtin` then checks arity and argument types per id. The table is also the source for `builtin_name()` and "did you mean" suggestions. Note that the Tide name `account_info` maps to `BuiltinId::account`.
+- **`builtin_table`** maps each standard-library name to a `BuiltinId` and an optional `Op`: none for pure builtins, `Op::read` (reads network state; only in genesis, bootstrap or scenario) or `Op::live` (needs a running network; only in bootstrap or scenario). `check_builtin` then checks arity and argument types per id. The table is also the source for `builtin_name()` and "did you mean" suggestions. Note that the Tide name `account_info` maps to `BuiltinId::account`.
+- **Network operations** (`Op`: read, write, send, live) also come from statements: genesis declarations are `write`, `transaction`/`invoke`/`deploy`/`airdrop` are `send`, `await` is `live`. In a block, each operation is checked against the block where it appears. In a function body, `record_op` records the first site of each kind instead (`OpSites`, kept per function in `fn_ops_`), including calls to functions that perform it. `check_call_ops` then checks a call against the callee's record, with the same placement rules, and `explain_op` follows the recorded calls to the responsible line for the notes. A function only sees functions declared before it, plus itself, so one pass is enough: callees are already recorded, and a self-call adds nothing. A function that both writes and sends (or is `live`) is reported at its definition by `report_uncallable`.
 - **Field specs** (`FieldSpec` / `ExtSpec` / `BlockSpec`) list, for every record-like block, the accepted keys, their expected type (`Ty`) and whether they are required. There are specs for each genesis entity (`account_fields`, `mint_fields`, ...), Token-2022 extensions, sysvars, `options`, `validator`, `transaction`, `instruction` and `invoke`. Unknown keys, missing required keys and type mismatches are reported here, before execution.
 
 ### Interpreter
@@ -320,7 +321,7 @@ The **field-handler consistency test** ("every checker-accepted field has an int
 ### Add a builtin
 
 1. `src/ast.hpp`: add an enumerator to `BuiltinId`.
-2. `src/sema.cpp`: add a row to `builtin_table` (Tide name, id, `Effect`), then a `case` in `check_builtin` that checks arity and argument types and returns the result type. A check longer than a line or two goes into a `check_<name>` helper next to `check_builtin`, which keeps the function under the complexity limit.
+2. `src/sema.cpp`: add a row to `builtin_table` (Tide name, id, `pure` or the `Op` it performs), then a `case` in `check_builtin` that checks arity and argument types and returns the result type. A check longer than a line or two goes into a `check_<name>` helper next to `check_builtin`, which keeps the function under the complexity limit.
 3. `src/interp.cpp`: add a `case` in `call_builtin`, again delegating anything non-trivial to a `builtin_<name>` helper next to it. If it needs network state, read through the active `RuntimeClient` or `GenesisBuilder`, never a concrete backend.
 4. If it needs new Solana logic (an encoding, a layout, a derivation), put it in `src/solana.{hpp,cpp}` and test it in `tests/solana_test.cpp` against SDK-generated vectors.
 5. Tests: checker errors in `frontend_test.cpp`, behaviour in `interp_test.cpp`.

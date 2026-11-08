@@ -13,6 +13,8 @@ them (`transaction`, `invoke`, `deploy`, `airdrop`, `await`), how `assert`
 behaves at runtime, and the reserved `warp`, `snapshot` and `restore`
 statements. General statements (`let`, `if`, `for`, `while`, function calls)
 work here too; see [expressions and statements](expressions-and-statements.md).
+Runtime statements can also be packaged in a function and called from here; see
+[what a function can do](declarations-and-scope.md#what-a-function-can-do).
 
 ## Bootstrap and scenarios
 

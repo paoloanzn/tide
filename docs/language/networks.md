@@ -294,9 +294,11 @@ statements make sense in which block. The rules follow from what exists at
 each point of the lifecycle:
 
 - **Top level** runs before any network exists, so it only holds declarations.
-- **Functions** are pure computations that can be called from anywhere. They
-  cannot read or change network state, so the same call always gives the same
-  result.
+- **Functions** can contain any statement or builtin. What a function's body
+  does decides where it can be called: a function that sends transactions can
+  only be called in bootstrap and scenarios, one that declares accounts only in
+  genesis, and one that touches no network at all anywhere (see
+  [what a function can do](declarations-and-scope.md#what-a-function-can-do)).
 - **Network configuration** (`options`, `validator`) is a list of
   `key = value;` entries, not statements.
 - **Genesis** builds the initial state directly, before any validator exists.
@@ -315,8 +317,8 @@ each point of the lifecycle:
 | assignment, `if`, `for`, `while`, `assert`, function calls | no | yes | yes | yes |
 | `break`, `continue` | no | inside loops | inside loops | inside loops |
 | `return` | no | yes | no | no |
-| `account`, `program`, `mint`, `token_account`, `associated_token_account`, `lookup_table`, `sysvar`, `feature`, `fork`, `clone`, `delete` | no | no | yes | no |
-| `transaction`, `invoke`, `deploy`, `airdrop`, `await` | no | no | no | yes |
+| `account`, `program`, `mint`, `token_account`, `associated_token_account`, `lookup_table`, `sysvar`, `feature`, `fork`, `clone`, `delete` | no | yes (callable only in genesis) | yes | no |
+| `transaction`, `invoke`, `deploy`, `airdrop`, `await` | no | yes (callable only in bootstrap and scenarios) | no | yes |
 | `warp`, `snapshot`, `restore` | reserved for a future version: always an error | | | |
 
 Builtins follow the same logic:
@@ -326,6 +328,9 @@ Builtins follow the same logic:
 | `balance`, `token_balance`, `account_info`, `exists` (read network state) | `genesis` (reads the state being built), `bootstrap`, `scenario` |
 | `slot`, `epoch` (need a running network) | `bootstrap`, `scenario` |
 | every other builtin | anywhere expressions are allowed |
+
+A function body may use any of them; the function then carries the same
+restriction to its callers.
 
 Top-level `let` bindings are read-only everywhere: the top level holds no
 assignments, and functions and blocks cannot reassign them. Network-level and
@@ -349,6 +354,7 @@ network dev {
     let s = slot();
   }
   scenario s1 {
+    fund(alice.pubkey);
     account alice.pubkey { lamports = 1 SOL; }
     warp by slots 10;
   }
@@ -356,9 +362,6 @@ network dev {
 ```
 
 ```text
-net.tid:3:3: error: 'account' declarations are only allowed inside genesis (found in a function)
- 3 |   account pk { lamports = 1 SOL; }
-   |   ^
 net.tid:6:31: error: 'balance' reads network state and can only be used inside genesis, bootstrap or scenario blocks
  6 |   options { slots_per_epoch = balance(alice.pubkey); }
    |                               ^~~~~~~
@@ -371,11 +374,17 @@ net.tid:9:5: error: 'keypair' declarations are only allowed at top level or dire
 net.tid:10:13: error: 'slot' needs a running network and can only be used inside bootstrap or scenario blocks
  10 |     let s = slot();
     |             ^~~~
-net.tid:13:5: error: 'account' declarations are only allowed inside genesis (found in bootstrap/scenario)
- 13 |     account alice.pubkey { lamports = 1 SOL; }
+net.tid:13:5: error: 'fund' declares genesis state and can only be called inside genesis
+ 13 |     fund(alice.pubkey);
+    |     ^~~~
+net.tid:3:3: note: 'account' declares genesis state here
+ 3 |   account pk { lamports = 1 SOL; }
+   |   ^
+net.tid:14:5: error: 'account' declarations are only allowed inside genesis (found in bootstrap/scenario)
+ 14 |     account alice.pubkey { lamports = 1 SOL; }
     |     ^
-net.tid:14:5: error: 'warp' is reserved for a future version of Tide: live-network control (warp, snapshot, restore) is not supported yet
- 14 |     warp by slots 10;
+net.tid:15:5: error: 'warp' is reserved for a future version of Tide: live-network control (warp, snapshot, restore) is not supported yet
+ 15 |     warp by slots 10;
     |     ^
 7 error(s), 0 warning(s)
 ```
@@ -396,8 +405,9 @@ net.tid:2:3: error: expected a network entry (options, validator, source, keypai
 1 error(s), 0 warning(s)
 ```
 
-Functions can still help genesis and runtime blocks: they compute values
-(addresses, amounts, encoded data), and the block that calls them does the
-declaring or the sending.
+Functions help genesis and runtime blocks in two ways: pure functions compute
+values (addresses, amounts, encoded data), and functions with network
+operations package whole steps, such as funding a wallet or calling a
+program, for reuse across blocks and files.
 
 Next: [genesis declarations](genesis.md), then [runtime statements](runtime.md).
