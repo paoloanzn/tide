@@ -258,32 +258,136 @@ depth.tid:1:33: error: maximum call depth (256) exceeded; is there unbounded rec
 
 Like other runtime errors, this is reported by `tide up`, not by `tide check`.
 
-### Purity
+### What a function can do
 
-Function bodies are pure computations. They can see their parameters, their own
-local variables, and the top-level declarations (including import aliases)
-that precede the function. They cannot see network-level names, and they
-cannot touch network state:
+A function body can see its parameters, its own local variables, and the
+top-level declarations (including import aliases) that precede the function.
+It cannot see network-level names: pass values from the network in as
+arguments.
 
-- builtins that read state (`balance`, `token_balance`, `account_info`,
-  `exists`) and the runtime-only builtins `slot()` and `epoch()` are rejected;
-- genesis declarations (`account`, `mint`, ...) and runtime statements
-  (`transaction`, `invoke`, ...) are rejected.
+Within that scope, a body can contain any statement or builtin, including the
+ones that touch a network. What the body does decides where the function can
+be called. Network operations come in four kinds:
+
+| Kind | Statements and builtins | The function can be called in |
+|---|---|---|
+| read | `balance`, `token_balance`, `account_info`, `exists` | `genesis`, `bootstrap`, `scenario` |
+| write | `account`, `program`, `mint`, `token_account`, `associated_token_account`, `lookup_table`, `sysvar`, `feature`, `fork`, `clone`, `delete` | `genesis` |
+| send | `transaction`, `invoke`, `airdrop`, `deploy` | `bootstrap`, `scenario` |
+| live | `slot()`, `epoch()`, `await` | `bootstrap`, `scenario` |
+
+A function does what its own lines do, plus what the functions it calls do.
+It can be called only where all of that is allowed. A function that does none
+of it is pure and can be called anywhere, including top-level and
+network-level `let` initializers and `options` blocks.
+
+This makes setup and test steps reusable, for example from a library:
 
 ```tide
-fn rich(pk: pubkey) -> bool { return balance(pk) > 1 SOL; }
+// lib/wallets.tid
+
+// read: callable in genesis, bootstrap and scenarios
+fn funded(user: pubkey) -> bool {
+  return balance(user) > 0;
+}
+
+// write: callable in genesis
+fn prefund(user: pubkey) {
+  account user { lamports = 10 SOL; }
+}
+
+// send: callable in bootstrap and scenarios
+fn top_up(user: pubkey) {
+  airdrop user amount 1 SOL;
+}
+
+// read + send: callable in bootstrap and scenarios
+fn setup(user: pubkey) {
+  top_up(user);
+  assert funded(user);
+}
+```
+
+```tide
+// dev.tid
+import "lib/wallets.tid" as wallets;
+keypair bob = seed("bob");
+network dev {
+  genesis {
+    wallets.prefund(bob.pubkey);
+    assert wallets.funded(bob.pubkey);
+  }
+  bootstrap { wallets.setup(bob.pubkey); }
+  scenario topped_up { wallets.top_up(bob.pubkey); }
+}
+```
+
+A statement inside a function runs exactly as if it were written in the block
+that called the function: in `genesis` it adds to the state being built, in
+`bootstrap` and scenarios it goes to the validator.
+
+Calling a function where it is not allowed is reported at the call. Notes
+follow the calls down to the line responsible:
+
+```tide
+import "lib/wallets.tid" as wallets;
+keypair bob = seed("bob");
+network dev {
+  genesis {
+    wallets.setup(bob.pubkey);
+  }
+}
 ```
 
 ```text
-pure.tid:1:38: error: 'balance' reads network state and can only be used inside genesis, bootstrap or scenario blocks
- 1 | fn rich(pk: pubkey) -> bool { return balance(pk) > 1 SOL; }
-   |                                      ^~~~~~~
+bad.tid:5:5: error: 'wallets.setup' sends a transaction and cannot be called in genesis, where no network is running yet
+ 5 |     wallets.setup(bob.pubkey);
+   |     ^~~~~~~
+lib/wallets.tid:18:3: note: 'setup' calls 'top_up' here
+ 18 |   top_up(user);
+    |   ^~~~~~
+lib/wallets.tid:13:3: note: 'airdrop' sends a transaction here
+ 13 |   airdrop user amount 1 SOL;
+    |   ^
+1 error(s), 0 warning(s)
 ```
 
-The restriction exists because a function can be called from top-level code,
-which runs before any genesis state exists. To compute something from state,
-read the state in the block and pass the value in: `let rich = is_rich(balance(pk));`.
-All other builtins, including `print`, and the `assert` statement are allowed in functions.
+Genesis runs before any validator exists, and bootstrap and scenarios run
+after genesis is sealed. A function that both writes genesis state and sends
+transactions (or needs the running network) therefore fits nowhere. It is
+reported at its definition:
+
+```tide
+fn fund_and_top_up(user: pubkey) {
+  account user { lamports = 10 SOL; }
+  airdrop user amount 1 SOL;
+}
+```
+
+```text
+both.tid:1:4: error: function 'fund_and_top_up' declares genesis state and sends a transaction, so it cannot be called anywhere: genesis declarations are only allowed in genesis, where no network is running yet
+ 1 | fn fund_and_top_up(user: pubkey) {
+   |    ^~~~~~~~~~~~~~~
+both.tid:2:3: note: 'account' declares genesis state here
+ 2 |   account user { lamports = 10 SOL; }
+   |   ^
+both.tid:3:3: note: 'airdrop' sends a transaction here
+ 3 |   airdrop user amount 1 SOL;
+   |   ^
+1 error(s), 0 warning(s)
+```
+
+Split it into two functions, one called from `genesis` and one from
+`bootstrap`.
+
+Two details:
+
+- Program labels must be unique within one body, as in `genesis`. A function
+  that declares `program vault` can still be called twice with different ids:
+  both programs are named `vault` in messages. Two declarations at the same
+  address are always an error.
+- Relative paths, such as a program `binary`, resolve against the directory of
+  the root script, even when the function is in an imported file.
 
 ## Imports
 

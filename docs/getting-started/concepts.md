@@ -156,8 +156,9 @@ net.tid:4:5: error: execution step limit exceeded (10000000 steps); is there an 
 1 error(s), 0 warning(s)
 ```
 
-Function bodies are pure (they cannot read network state), and the call depth
-is limited to 256. See
+A function can be called only where everything its body does is allowed (a
+function that sends transactions cannot run in genesis, for example), and the
+call depth is limited to 256. See
 [expressions and statements](../language/expressions-and-statements.md).
 
 ## Check-time and run-time errors

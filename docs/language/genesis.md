@@ -16,7 +16,9 @@ and the statement-context rules are covered in [networks](networks.md).
   before `bootstrap` (see [evaluation order](networks.md#evaluation-order)).
 - Declarations run in order, like statements. Genesis is ordinary Tide code:
   you can use `let`, `if`, `for`, `while`, `assert` and function calls to
-  compute addresses, amounts and account data.
+  compute addresses, amounts and account data. A function can also contain
+  declarations itself, which run as if written here (see
+  [what a function can do](declarations-and-scope.md#what-a-function-can-do)).
 - State queries (`balance()`, `token_balance()`, `account_info()`,
   `exists()`) work in genesis and read the state declared so far.
 - Transactions, airdrops and other runtime statements are not allowed: no

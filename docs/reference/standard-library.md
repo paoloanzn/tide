@@ -37,18 +37,37 @@ type as `type mismatch in argument 1 of 'sha256': expected string or bytes, foun
 
 Most builtins are pure: they compute a value from their arguments and work in
 every context (top level, functions, network configuration, genesis,
-bootstrap and scenarios). Two groups are restricted because they read the
-state of a network:
+bootstrap and scenarios). Two groups are restricted because they need a
+network:
 
 | Group | Builtins | Allowed in | Why |
 |---|---|---|---|
 | State queries | `balance`, `token_balance`, `account_info`, `exists` | `genesis`, `bootstrap`, `scenario` | They need network state. In genesis they read the state built so far; at runtime they read the validator. |
 | Runtime only | `slot`, `epoch` | `bootstrap`, `scenario` | They need a running validator; genesis has no slot yet. |
 
-Neither group may be used in a function body, at top level, or in `options` and
-`validator` blocks, even if the function is only called from a scenario.
-Functions stay pure so that their result does not depend on where they are
-called. Pass the queried value in as an argument instead.
+Neither group may be used at top level or in `options` and `validator` blocks.
+Both may be used in a function body. The function then reads state (or needs a
+running network) too, and can only be called where the builtin is allowed:
+
+```tide
+fn rich(pk: pubkey) -> bool { return balance(pk) > 1 SOL; }
+let r = rich(seed("a").pubkey);
+```
+
+```text
+rich.tid:2:9: error: 'rich' reads network state and can only be called inside genesis, bootstrap or scenario blocks
+ 2 | let r = rich(seed("a").pubkey);
+   |         ^~~~
+rich.tid:1:38: note: 'balance' reads network state here
+ 1 | fn rich(pk: pubkey) -> bool { return balance(pk) > 1 SOL; }
+   |                                      ^~~~~~~
+1 error(s), 0 warning(s)
+```
+
+See [what a function can do](../language/declarations-and-scope.md#what-a-function-can-do)
+for the full rule, which also covers genesis declarations and runtime statements.
+
+When a builtin is written directly in a block, the errors look like this:
 
 ```text
 fnstate.tid:2:10: error: 'balance' reads network state and can only be used inside genesis, bootstrap or scenario blocks
