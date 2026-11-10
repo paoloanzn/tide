@@ -4,9 +4,9 @@
 # Keep side effects inside main so a truncated piped download cannot start setup.
 set -eu
 
-# Bootstrap: set this to the published skill/docs commit after the first merge.
-# A pin names an already-published commit, not the commit editing this installer.
-PINNED_COMMIT=''
+# Maintainer-selected default: advance this after publishing skill/docs changes.
+# Users only need TIDE_SKILL_COMMIT when explicitly choosing another snapshot.
+PINNED_COMMIT='eb310a2b468ff591c5354a80ae2e63e3833546fc'
 
 say() { printf 'tide-skill: %s\n' "$*" >&2; }
 fail() { say "error: $*"; exit 1; }
@@ -25,7 +25,8 @@ Repeat --agent or --skills-dir to select destinations explicitly.
 Agents: shared, codex, cursor, gemini, opencode, amp, claude, copilot, cline,
         kiro, antigravity, all.
 --skills-dir selects a skills parent directory; the skill is installed as tide/.
-TIDE_SKILL_COMMIT overrides the embedded commit pin (40 lowercase hex characters).
+The default source commit is maintained by Tide; no user configuration is needed.
+TIDE_SKILL_COMMIT optionally overrides it (40 lowercase hex characters).
 An absent/unavailable pin falls back to main, with a warning.
 Run this installer again to update. Reload skills or restart your agent afterward.
 EOF

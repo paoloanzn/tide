@@ -97,7 +97,10 @@ class InstallerTest(unittest.TestCase):
         return filename
 
     def run_installer(self, *arguments, pin=PIN, success=True):
-        env = dict(self.env, TIDE_SKILL_COMMIT=pin)
+        env = dict(self.env)
+        env.pop("TIDE_SKILL_COMMIT", None)
+        if pin is not None:
+            env["TIDE_SKILL_COMMIT"] = pin
         result = subprocess.run(
             [os.environ.get("TIDE_TEST_SHELL", "/bin/sh"), str(REPO / "install-skill.sh"),
              "--skills-dir", str(self.destination), *arguments],
@@ -120,6 +123,20 @@ class InstallerTest(unittest.TestCase):
     def installed_files(self):
         return {p.relative_to(self.skill): p.read_bytes()
                 for p in self.skill.rglob("*") if p.is_file()}
+
+    def test_default_install_uses_maintainer_pin_without_warning(self):
+        declaration = next(line for line in (REPO / "install-skill.sh").read_text().splitlines()
+                           if line.startswith("PINNED_COMMIT="))
+        default_pin = declaration.split("=", 1)[1].strip("'")
+        self.assertRegex(default_pin, r"^[0-9a-f]{40}$")
+        self.archive(default_pin)
+        result = self.run_installer(pin=None)
+        self.assertNotIn("warning:", result.stderr)
+        self.assertIn("commit=" + default_pin, (self.skill / "SOURCE").read_text())
+        self.assertIn("fallback=false", (self.skill / "SOURCE").read_text())
+        requests = [json.loads(line) for line in (self.fixtures / "requests.jsonl").read_text().splitlines()]
+        self.assertEqual(len(requests), 1)
+        self.assertIn("https://github.com/paoloanzn/tide/archive/" + default_pin + ".tar.gz", requests[0])
 
     def test_installs_full_snapshot_and_preserves_reference_links(self):
         (self.source / "docs" / "additional.md").write_text("Dynamically included.\n")

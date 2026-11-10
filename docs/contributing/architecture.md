@@ -250,8 +250,8 @@ and bundled docs; other skills and the Tide binary are separate.
    released Tide version. An installer cannot embed its own commit's hash.
 3. Users re-run the same installation command to get the newly selected bundle.
 
-For the first publication, the pin is empty because no published snapshot
-contains the new skill yet. Advance it after that initial commit is published.
+The default pin is selected and updated by Tide maintainers. Users do not need
+to set a pin; `TIDE_SKILL_COMMIT` is only an explicit override of that default.
 An absent, unavailable, or incomplete pinned snapshot produces a visible
 fallback to `main` for **both** skill and docs. The installer resolves `main`
 to a commit through GitHub's API when available; otherwise it downloads a
