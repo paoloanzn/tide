@@ -256,6 +256,13 @@ The full documentation is in [`docs/`](docs/README.md). Good places to start:
 - [Language reference](docs/README.md#language-reference): the language, page by page.
 - [CLI reference](docs/reference/cli.md): commands, options and exit codes.
 
+## AI Disclaimer
+
+Most of Tide's code is written with AI assistance. The design of the language,
+and the engineering and implementation decisions behind it, are still made by
+people: AI tools help write the code, and people decide what Tide is and how it
+is built.
+
 ## License
 
 Tide is licensed under the [Apache License, Version 2.0](LICENSE). You may
