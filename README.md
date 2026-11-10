@@ -24,6 +24,15 @@ Tide replaces it with one declarative file:
 - **Solana-native.** Accounts, mints, token accounts, programs, PDAs and
   transactions are part of the language.
 
+## Documentation
+
+The full documentation is in [`docs/`](docs/README.md). Good places to start:
+
+- [Concepts](docs/getting-started/concepts.md): the ideas behind Tide.
+- [Tutorial](docs/getting-started/tutorial.md): build a network step by step.
+- [Language reference](docs/README.md#language-reference): the language, page by page.
+- [CLI reference](docs/reference/cli.md): commands, options and exit codes.
+
 ## How a run works
 
 `tide up` takes a script through a fixed sequence of phases.
@@ -246,15 +255,6 @@ tide down quickstart.tid
 stopping validator (pid 224230)
 network 'quickstart' stopped
 ```
-
-## Documentation
-
-The full documentation is in [`docs/`](docs/README.md). Good places to start:
-
-- [Concepts](docs/getting-started/concepts.md): the ideas behind Tide.
-- [Tutorial](docs/getting-started/tutorial.md): build a network step by step.
-- [Language reference](docs/README.md#language-reference): the language, page by page.
-- [CLI reference](docs/reference/cli.md): commands, options and exit codes.
 
 ## AI Disclaimer
 
