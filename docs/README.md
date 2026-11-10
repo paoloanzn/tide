@@ -17,6 +17,7 @@ Start here if you are new to Tide.
 |---|---|
 | [Concepts](getting-started/concepts.md) | The mental model: what a network definition is, why it is split into state and actions, and what is checked before anything runs. |
 | [Tutorial](getting-started/tutorial.md) | How to build and run a small network one step at a time, including what failures look like. |
+| [AI agent setup](../README.md#quick-start-with-an-ai-agent) | Install the official skill and let your agent check prerequisites and propose a network. |
 
 ## Language reference
 

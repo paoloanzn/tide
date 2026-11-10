@@ -155,6 +155,117 @@ Both workflows check out vcpkg at the `builtin-baseline` commit and cache the bu
 
 `install.sh` at the repository root is the installer linked from the README. It finds the latest release through the `releases/latest` redirect, downloads `tide-<os>-<arch>.tar.gz` and its `.sha256`, verifies it, and replaces the binary atomically. The archive names carry no version, so the installer and the release workflow must keep the same names.
 
+### Agent skill
+
+`skills/tide/SKILL.md` is the official onboarding skill. It follows the
+[Agent Skills specification](https://agentskills.io/specification), using
+portable frontmatter and instructions rather than agent-specific tools.
+Its workflow starts with prerequisite discovery, requires confirmation for
+installation, and preserves the developer's existing project configuration.
+The skill reads documentation as needed instead of embedding a second copy
+of the language reference in its instructions.
+
+`install-skill.sh` downloads a repository snapshot and packages the skill
+with the complete `docs/` tree under `references/docs/`. It also includes
+the root `README.md`, `LICENSE`, and `NOTICE` under `references/`, preserving
+the documentation's relative links. `SOURCE` records the selected commit,
+requested pin, fallback status, and Tide version from `CMakeLists.txt`.
+The installer does not install Tide or Agave; that is the skill's job after
+the developer approves the proposed commands.
+
+The [README command](../../README.md#quick-start-with-an-ai-agent) downloads the
+entire installer successfully before executing it. To inspect the script
+and choose destinations explicitly:
+
+```sh
+curl --proto '=https' --proto-redir '=https' -fsSL \
+  https://raw.githubusercontent.com/paoloanzn/tide/main/install-skill.sh \
+  -o install-skill.sh
+less install-skill.sh
+sh install-skill.sh --agent claude --agent codex
+```
+
+Run these download commands outside a project with an existing
+`install-skill.sh` if you want to keep that file. From a Tide checkout, run
+the checked-out installer directly.
+
+| Option or variable | Effect |
+| --- | --- |
+| No options | Register in the shared directory and detect other agents by their user directory or CLI executable. |
+| `--agent NAME` | Select an agent explicitly; repeat for multiple agents. `all` selects all directories below. |
+| `--skills-dir /absolute/path` | Register `/absolute/path/tide`; repeat for other destinations or agents. Explicit destinations replace automatic selection. |
+| `--help` | Show usage without downloading or writing anything. |
+| `TIDE_SKILL_COMMIT` | Override the embedded pin with a full, lowercase 40-character commit SHA. An empty value explicitly selects the main fallback. |
+| `CLAUDE_CONFIG_DIR` | Use this Claude Code configuration directory instead of `~/.claude`. Must be absolute when selected. |
+
+The installer maps agents to these personal skill directories:
+
+| Agent names | Directory |
+| --- | --- |
+| `shared`, `codex`, `cursor`, `gemini`, `opencode`, `amp` | `~/.agents/skills` |
+| `claude` | `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills` |
+| `copilot` | `~/.copilot/skills` |
+| `cline` | `~/.cline/skills` |
+| `kiro` | `~/.kiro/skills` |
+| `antigravity` | `~/.gemini/config/skills` |
+
+Each destination gets a real `tide/` directory: some agents do not discover
+symlinked skill folders. The installer stages complete bundles for all selected
+destinations before replacing any of them. It moves each previous bundle to a
+temporary backup, then renames the new bundle into place. The directory can
+briefly be absent between those two renames. If an activation fails, all changes
+from that invocation are rolled back. Identical installations keep their files.
+
+A `.tide-managed` marker identifies content owned by this installer. Updates
+replace that content, including local edits, and remove the previous bundle.
+Keep customizations in a separately named skill. Unrelated files, symlinks, or
+skills at a destination cause installation to stop instead of being overwritten.
+Every selected destination gets identical skill/docs contents; re-run with the
+same options to update those copies together.
+
+Downloads use HTTPS, including redirects, with bounded timeouts and retries.
+Archive validation rejects traversal, links, special files, and member names
+outside letters, digits, dots, underscores, hyphens, plus signs, `@`, and `/`.
+Only the skill, docs, README, license, notice, and version metadata are extracted;
+downloaded scripts are never executed. Commit pinning fixes source contents,
+but does not independently authenticate the downloaded installer or GitHub.
+
+Each skills directory has a temporary `.tide-install.lock` directory during an
+update. If a process was killed without cleanup, verify that no installer is
+still running before recovering it: `old/` contains the previous bundle, if any,
+and `new/` contains the staged replacement, if it has not yet been activated.
+Restore `old/` to `tide/` when needed, then remove the lock directory and retry.
+Reload skills or restart the agent after an update. Installation on one machine
+does not register the skill in a remote/cloud agent session.
+
+To uninstall, delete the installed `tide/` directory at each selected location,
+for example `rm -r ~/.agents/skills/tide`. This removes that copy of the skill
+and bundled docs; other skills and the Tide binary are separate.
+
+#### Publishing skill updates
+
+1. Commit and publish the skill and documentation changes together.
+2. Set `PINNED_COMMIT` in `install-skill.sh` to that published commit's full SHA,
+   then publish the installer change. Prefer a snapshot compatible with a
+   released Tide version. An installer cannot embed its own commit's hash.
+3. Users re-run the same installation command to get the newly selected bundle.
+
+For the first publication, the pin is empty because no published snapshot
+contains the new skill yet. Advance it after that initial commit is published.
+An absent, unavailable, or incomplete pinned snapshot produces a visible
+fallback to `main` for **both** skill and docs. The installer resolves `main`
+to a commit through GitHub's API when available; otherwise it downloads a
+single branch archive and records `main (unresolved)`. If that fallback also
+fails validation, the existing installation remains in place.
+
+Validate changes with `shellcheck install-skill.sh`, `sh -n install-skill.sh`,
+and `python3 tests/install_skill_test.py`. The tests use local archive responses
+and temporary destinations, require no network or third-party Python packages,
+and check installation, updates, fallback, archive rejection, collisions, and
+failure recovery. CI runs them on Linux and macOS independently of the C++ build.
+They verify installer behavior; onboarding instructions still need review for
+correct approvals, supported Tide constructs, and useful project proposals.
+
 ### Cutting a release
 
 The version is written in `project(tide VERSION ...)` in `CMakeLists.txt`. CMake passes it to the code as `TIDE_VERSION`, which `tide --version` prints. `vcpkg.json` has a `version-string` that must match, and the release workflow fails if it does not.

@@ -94,6 +94,31 @@ delete the binary (`rm ~/.local/bin/tide`). For other platforms, build from
 source as described in
 [Architecture and contributing](docs/contributing/architecture.md#building-from-source).
 
+### Quick start with an AI agent
+
+Install the official Tide skill, or update it, with this one command:
+
+```sh
+(tide_installer=$(mktemp) && trap 'rm -f "$tide_installer"' 0 && curl --proto '=https' --proto-redir '=https' -fsSL https://raw.githubusercontent.com/paoloanzn/tide/main/install-skill.sh -o "$tide_installer" && sh "$tide_installer")
+```
+
+Then open your agent in an existing Solana project or an empty directory,
+reload its skills or restart it, and ask:
+
+> /tide set up as Tide for this project.
+
+The skill checks prerequisites first and asks for confirmation with exact
+installation commands before installing anything. It then proposes a local
+network for your project, or asks what you want to build, and creates a
+`.tid` script while preserving existing repository configuration.
+
+By default it registers the skill in `~/.agents/skills` and the personal skill
+directories of detected Claude Code, Copilot, Cline, Kiro, and Antigravity
+installations. Explicit agent selection, custom directories, source pinning,
+and removal are covered in the
+[skill installer reference](docs/contributing/architecture.md#agent-skill).
+For a remote agent, install in the environment where that agent runs.
+
 ## Quick Start
 
 ### 1. A network with two funded accounts

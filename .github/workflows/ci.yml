@@ -17,6 +17,20 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  skill:
+    name: Agent skill installer (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check shell syntax
+        run: sh -n install-skill.sh
+      - name: Exercise installation and updates offline
+        run: python3 tests/install_skill_test.py
+
   format:
     name: Format
     runs-on: ubuntu-24.04
