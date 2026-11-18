@@ -1,0 +1,17 @@
+{
+  "name": "Tide",
+  // Same image GitHub Codespaces uses when a repo has no devcontainer.
+  "image": "mcr.microsoft.com/devcontainers/universal:latest",
+  // Installs vcpkg + build tools and configures CMake so clangd has
+  // build/debug/compile_commands.json. See scripts/setup-codespace.sh.
+  "postCreateCommand": "./scripts/setup-codespace.sh",
+  "customizations": {
+    "vscode": {
+      "extensions": ["llvm-vs-code-extensions.vscode-clangd"],
+      "settings": {
+        // clangd provides diagnostics; Microsoft's engine would duplicate them.
+        "C_Cpp.intelliSenseEngine": "disabled"
+      }
+    }
+  }
+}
