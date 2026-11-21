@@ -95,15 +95,18 @@ network.
 
 `transaction` sends one Solana transaction built from raw instructions. Use it
 for any program whose instruction layout you know: system transfers, SPL Token
-instructions, memos, or your own program with hand-encoded data.
+instructions, memos, or your own program with hand-encoded data. It also sends
+[instruction values](#instruction-values) built elsewhere, for example by
+library functions or by [`anchor_ix`](../reference/standard-library.md#anchor_ix).
 
 ```text
 transaction [as <name>] {
   <key> = <value>;            // zero or more transaction keys
-  instruction <program-id> {  // one or more instructions, run in order
+  instruction <program-id> {  // instruction blocks, run in order
     accounts = [ ... ];
     data = <bytes>;
   }
+  instructions = [ ... ];     // and/or a list of instruction values
 }
 ```
 
@@ -115,9 +118,12 @@ transaction [as <name>] {
 | `signers` | `[keypair]` | `[]` | Keypairs that sign the transaction. |
 | `compute_unit_limit` | `u32` | not set | Prepends a Compute Budget `SetComputeUnitLimit` instruction. |
 | `compute_unit_price` | `u64` | not set | Micro-lamports per compute unit. Prepends a Compute Budget `SetComputeUnitPrice` instruction. |
+| `instructions` | `[instruction]` | `[]` | [Instruction values](#instruction-values), sent where the key is written. |
 
 Unknown and duplicate keys are errors at check time. At least one
-`instruction` is required:
+`instruction` block or an `instructions` key is required. An `instructions`
+list that turns out empty at run time, with no block next to it, fails the
+statement with the same message:
 
 ```text
 notx.tid:4:5: error: transaction has no instructions
@@ -159,6 +165,62 @@ instructions, a system transfer of 1000 lamports from `alice` to `bob`, and a
 memo. Helpers such as `system_transfer` and `memo` build the instruction data;
 see [instruction data helpers](../reference/standard-library.md#instruction-data-helpers).
 
+### Instruction values
+
+An [`instruction`](types-and-values.md#instruction) is a value:
+`{ program: pubkey, accounts: [account_meta], data: bytes }`. Building one does
+not send it, so a library function can return instructions and the script
+decides how to send them. The `instructions` key sends a list of them:
+
+```tide
+// lib/lending.tid
+fn borrow(pool: pubkey, user: pubkey, token_mint: pubkey, amount: u64) -> instruction {
+  return anchor_ix(LENDING, {
+    method: "flash_borrow",
+    accounts: { pool: pool, vault: pda(LENDING, ["vault", pool]), user_token: ata(user, token_mint), user: user },
+    args: { amount: amount },
+  });
+}
+
+// test.tid
+transaction as tx {
+  signers = [alice];
+  instructions = [
+    lending.borrow(pool, alice.pubkey, usdc, 1000000000),
+    dex.swap(alice.pubkey, usdc, wsol, 1000000000, 0),
+    dex.swap(alice.pubkey, wsol, usdc, 0, 0),
+    lending.repay(pool, alice.pubkey, usdc, 1000900000),
+  ];
+}
+assert tx.success;
+```
+
+Blocks and the list can be mixed in one transaction. Instructions are sent in
+source order: each `instruction` block where it is written, and the entries
+of `instructions` where the key is written. Every account meta, from a block
+or from a value, follows the [account meta rules](#account-metas) below when
+the transaction is sent.
+
+Because `transaction` takes a list, a helper can send any instructions and
+report the result, which is how a test checks that an operation is rejected:
+
+```tide
+fn rejected(ixs: [instruction], signers: [keypair]) -> bool {
+  transaction as tx { signers = signers; instructions = ixs; }
+  return !tx.success;
+}
+
+scenario only_admin_withdraws {
+  assert !rejected([vault.withdraw(admin.pubkey, 1000)], [admin]);
+  assert rejected([vault.withdraw(mallory.pubkey, 1000)], [mallory]);
+}
+```
+
+An instruction can also be read as data, for example to encode it inside
+another program's instruction (a multisig proposal): `ix.program`,
+`ix.data`, and for each `m` in `ix.accounts`, `m.key`, `m.signer` and
+`m.writable`.
+
 ### Account metas
 
 Every entry of `accounts` becomes an account meta (pubkey, signer flag,
@@ -193,6 +255,10 @@ Here all three accounts are writable, and `alice.pubkey` is also a signer
 because `alice` is in `signers` (it is also the fee payer, since no
 `fee_payer` is given). That matches what SPL Token `Transfer` expects: source,
 destination, owner.
+
+These rules apply when the transaction is sent. An `account_meta` value read
+before that (`m.signer`, `m.writable`) reports the flags as written: a plain
+pubkey reads as writable and not a signer.
 
 When the transaction is compiled, metas for the same key are merged (a key is
 a signer if any instruction marks it as a signer, writable if any marks it
@@ -291,6 +357,9 @@ Hand-encoding instruction data for an Anchor program means computing the
 8-byte discriminator, borsh-encoding every argument and listing accounts in
 exactly the right order with the right flags. `invoke` does all of that from
 the program's Anchor IDL, so you refer to accounts and arguments by name.
+[`anchor_ix`](../reference/standard-library.md#anchor_ix) builds the same
+instruction without sending it; `invoke` is that construction followed by a
+send.
 
 ```text
 invoke <program-id> with { <key> = <value>; ... };
@@ -339,6 +408,9 @@ paying.
    whose `id` equals the invoked program id.
 3. Otherwise the statement fails with
    `no IDL known for program <id>; add 'idl = "...";' to its genesis program declaration or to this invoke`.
+
+`anchor_ix` finds its IDL the same way, from its `idl` key or the genesis
+declaration.
 
 Both Anchor IDL formats are supported: the 0.30+ format (explicit
 `discriminator` arrays, `writable`/`signer`, `pubkey`) and the older format
@@ -389,14 +461,17 @@ Tide does not derive PDA accounts from the IDL's `pda` seeds or resolve
 
 The signer flag comes from the IDL only: listing an account's keypair in
 `signers` does not make an IDL account a signer (unlike plain pubkeys in a
-`transaction`), but every IDL signer must have a keypair in `signers`.
+`transaction`), but every IDL signer must have a keypair in `signers`. An
+instruction built by `anchor_ix` and sent with `transaction` follows the
+`transaction` rules instead.
 
 ### Failure
 
 `invoke` has no result binding. A failed invoke always fails the enclosing
 block, with `invoke of '<method>' failed: <error>` followed by program logs.
-To inspect a failure instead, build the instruction yourself in a
-`transaction as <name>`.
+To inspect a failure instead, build the instruction with
+[`anchor_ix`](../reference/standard-library.md#anchor_ix) and send it in a
+`transaction as <name>` (see [instruction values](#instruction-values)).
 
 ## `deploy`
 

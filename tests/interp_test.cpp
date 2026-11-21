@@ -429,7 +429,8 @@ TEST_CASE("every checker-accepted field has an interpreter handler", "[interp]")
           }
           bootstrap {
             transaction { fee_payer = a.pubkey; signers = [a]; compute_unit_limit = 5000; compute_unit_price = 1;
-              instruction memo_program() { accounts = [a.pubkey]; data = memo("hi"); } }
+              instruction memo_program() { accounts = [a.pubkey]; data = memo("hi"); }
+              instructions = [{ program: memo_program(), accounts: [], data: memo("listed") }]; }
             invoke p.pubkey with { method = "go"; accounts = {}; args = {}; signers = [a]; fee_payer = a.pubkey;
               idl = "p.json"; compute_unit_limit = 5000; remaining_accounts = [readonly(m)]; };
           }
@@ -447,6 +448,7 @@ TEST_CASE("every checker-accepted field has an interpreter handler", "[interp]")
     CHECK(c.validators[0].identity.has_value());
     REQUIRE(r->backend.txs.size() == 2);
     CHECK(r->backend.txs[0].compute_unit_price == 1U);
+    CHECK(r->backend.txs[0].instructions.size() == 2);              // instructions
     CHECK(r->backend.txs[1].instructions[0].accounts.size() == 1);  // remaining_accounts
     CHECK(r->backend.clones.at(0).overrides.executable == false);
     fs::remove_all(dir);
@@ -565,6 +567,122 @@ TEST_CASE("invoke encodes Anchor instructions from the program IDL", "[interp]")
     )",
                    {}, dir / "bad.tid");
     CHECK(bad->has("instruction 'increment' has no argument 'extra'"));
+    fs::remove_all(dir);
+}
+
+TEST_CASE("instruction values are read as data and sent in source order", "[interp]") {
+    auto r = run(R"(
+        keypair a = seed("a");
+        keypair b = seed("b");
+        fn pay(to: pubkey) -> instruction {
+          return { program: system_program(), accounts: [a.pubkey, to], data: system_transfer(5) };
+        }
+        network n {
+          bootstrap {
+            let ix = pay(b.pubkey);
+            assert ix.program == system_program() && ix.data == system_transfer(5);
+            assert ix.accounts[1].key == b.pubkey && ix.accounts[1].writable && !ix.accounts[1].signer;
+            let ro: instruction = { program: memo_program(), accounts: [readonly(b.pubkey), signer(a.pubkey, false)],
+                                    data: memo("x") };
+            assert !ro.accounts[0].writable && !ro.accounts[0].signer;
+            assert ro.accounts[1].signer && !ro.accounts[1].writable;
+            transaction {
+              signers = [a];
+              instruction memo_program() { data = memo("first"); }
+              instructions = [ix, ro];
+              instruction memo_program() { data = memo("last"); }
+            }
+          }
+        }
+    )");
+    INFO(r->dump());
+    REQUIRE(r->result.ok);
+    REQUIRE(r->backend.txs.size() == 1);
+    const auto& ixs = r->backend.txs[0].instructions;
+    REQUIRE(ixs.size() == 4);
+    CHECK(ixs[0].data == sol::Bytes{'f', 'i', 'r', 's', 't'});
+    CHECK(ixs[1].program_id == sol::ids::system_program);
+    CHECK(ixs[1].data == sol::system_transfer_data(5));
+    REQUIRE(ixs[1].accounts.size() == 2);
+    CHECK((ixs[1].accounts[0].is_signer && ixs[1].accounts[0].is_writable));   // a: promoted at send time
+    CHECK((!ixs[1].accounts[1].is_signer && ixs[1].accounts[1].is_writable));  // b: bare pubkey
+    CHECK(ixs[2].program_id == sol::ids::memo_program);
+    REQUIRE(ixs[2].accounts.size() == 2);
+    CHECK((!ixs[2].accounts[0].is_signer && !ixs[2].accounts[0].is_writable));
+    CHECK((ixs[2].accounts[1].is_signer && !ixs[2].accounts[1].is_writable));
+    CHECK(ixs[3].data == sol::Bytes{'l', 'a', 's', 't'});
+
+    auto empty = run(R"(
+        keypair a = seed("a");
+        network n { bootstrap { transaction { signers = [a]; instructions = []; } } }
+    )");
+    CHECK(empty->has("transaction has no instructions"));
+    CHECK(empty->backend.txs.empty());
+}
+
+TEST_CASE("anchor_ix builds the instruction invoke sends", "[interp]") {
+    const fs::path dir = temp_dir("tide_anchor_ix_test");
+    std::ofstream(dir / "counter.so") << "not really elf";
+    std::ofstream(dir / "counter.json") << R"({
+      "instructions": [{
+        "name": "increment",
+        "discriminator": [11, 18, 104, 9, 104, 174, 59, 33],
+        "accounts": [{"name": "state", "writable": true}, {"name": "authority", "signer": true},
+                     {"name": "system_program", "address": "11111111111111111111111111111111"}],
+        "args": [{"name": "by", "type": "u64"}]
+      }]
+    })";
+    const std::string src = R"(
+        keypair admin = seed("admin");
+        keypair counter = seed("counter");
+        let state = pda(counter.pubkey, ["state"]);
+        let extra = seed("extra").pubkey;
+        let top = anchor_ix(counter.pubkey, { method: "increment", accounts: { state: state, authority: admin.pubkey },
+                                             args: { by: 2 }, idl: "counter.json" });
+        fn increment(by: u64) -> instruction {
+          return anchor_ix(counter.pubkey, { method: "increment", accounts: { state: state, authority: admin.pubkey },
+                                             args: { by: by }, remaining_accounts: [readonly(extra), admin.pubkey] });
+        }
+        network n {
+          genesis {
+            program counter { id = counter.pubkey; binary = "counter.so"; idl = "counter.json"; }
+          }
+          bootstrap {
+            invoke counter.pubkey with { method = "increment"; accounts = { state: state, authority: admin.pubkey };
+              args = { by: 2 }; remaining_accounts = [readonly(extra), admin.pubkey]; signers = [admin]; };
+            let ix = increment(2);
+            assert ix.program == counter.pubkey && ix.data == top.data && len(ix.accounts) == 5;
+            assert ix.accounts[0].writable && !ix.accounts[0].signer && ix.accounts[1].signer;
+            assert !ix.accounts[3].writable && !ix.accounts[4].signer;  // as written; promoted when sent
+            transaction { signers = [admin]; instructions = [ix]; }
+          }
+        }
+    )";
+    auto r = run(src, {}, dir / "main.tid");
+    INFO(r->dump());
+    REQUIRE(r->result.ok);
+    REQUIRE(r->backend.txs.size() == 2);
+    const auto& invoked = r->backend.txs[0].instructions.at(0);
+    const auto& built = r->backend.txs[1].instructions.at(0);
+    CHECK(built.program_id == invoked.program_id);
+    CHECK(built.data == invoked.data);
+    REQUIRE(built.accounts.size() == invoked.accounts.size());
+    for (std::size_t i = 0; i < built.accounts.size(); ++i) {
+        INFO("account " << i);
+        CHECK(built.accounts[i].pubkey == invoked.accounts[i].pubkey);
+        CHECK(built.accounts[i].is_signer == invoked.accounts[i].is_signer);
+        CHECK(built.accounts[i].is_writable == invoked.accounts[i].is_writable);
+    }
+
+    auto no_idl = run(R"(
+        network n { bootstrap { let ix = anchor_ix(seed("p").pubkey, { method: "go" }); } }
+    )");
+    CHECK(no_idl->has("to its genesis program declaration or 'idl: \"...\"' to this anchor_ix"));
+    auto unknown = run(R"(
+        network n { bootstrap { let ix = anchor_ix(seed("p").pubkey, { method: "nope", idl: "counter.json" }); } }
+    )",
+                       {}, dir / "unknown.tid");
+    CHECK(unknown->has("IDL 'counter.json' has no instruction 'nope'"));
     fs::remove_all(dir);
 }
 

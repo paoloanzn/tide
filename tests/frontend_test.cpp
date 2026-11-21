@@ -484,6 +484,73 @@ TEST_CASE("runtime statement validation", "[sema]") {
     CHECK(compile(net("await 1;"))->has("expected bool, found int"));
 }
 
+TEST_CASE("instructions are values", "[sema]") {
+    const std::string decls = R"(keypair k = seed("k");
+fn pay(to: pubkey) -> instruction {
+  return { program: system_program(), accounts: [k.pubkey, to], data: system_transfer(5) };
+}
+fn keys(ixs: [instruction]) -> [pubkey] {
+  let out: [pubkey] = [];
+  for ix in ixs { for m in ix.accounts { if m.signer || !m.writable { out = out + [m.key]; } } }
+  return out;
+}
+fn rejected(ixs: [instruction], signers: [keypair]) -> bool {
+  transaction as tx { signers = signers; instructions = ixs; }
+  return !tx.success;
+}
+)";
+    auto net = [&](const std::string& body) { return decls + "network n { scenario s {\n" + body + "\n} }"; };
+    CHECK(compile(decls + "let ix = pay(k.pubkey); let p: pubkey = ix.program; let d: bytes = ix.data;")->ok());
+    CHECK(compile(net("let ix = pay(k.pubkey);\n"
+                      "transaction { signers = [k]; instruction memo_program() { data = memo(\"a\"); }\n"
+                      "  instructions = [ix, pay(seed(\"b\").pubkey)]; }\n"
+                      "assert !rejected([ix], [k]) && len(keys([ix])) == 0;"))
+              ->ok());
+    CHECK(compile(net("transaction { signers = [k]; instructions = [pay(k.pubkey)]; }"))->ok());
+
+    CHECK(compile("let m = readonly(system_program()).writeable;")
+              ->has("type account_meta has no member 'writeable'; did you mean 'writable'?"));
+    CHECK(compile("let x: instruction = { program: system_program(), data: hex(\"\") };")
+              ->has("missing field 'accounts' for instruction"));
+    CHECK(compile("let x: instruction = { program: system_program(), accounts: [1], data: hex(\"\") };")
+              ->has("expected account_meta, found int"));
+    CHECK(compile(net("transaction { signers = [k]; instructions = [1]; }"))->has("expected instruction, found int"));
+    CHECK(compile(net("transaction { signers = [k]; instructions = [pay(k.pubkey)]; instructions = []; }"))
+              ->has("duplicate transaction field 'instructions'"));
+    CHECK(compile("schema S using borsh { ix: instruction; }")->has("cannot be used in a schema"));
+    CHECK(compile("let x: instructon = 1;")->has("did you mean 'instruction'?"));
+}
+
+TEST_CASE("anchor_ix checks its keys and reads the network only without an IDL", "[sema]") {
+    const std::string decls = R"(keypair k = seed("k");
+fn with_idl() -> instruction { return anchor_ix(k.pubkey, { method: "go", idl: "p.json" }); }
+fn from_genesis() -> instruction { return anchor_ix(k.pubkey, { method: "go", accounts: { a: k.pubkey } }); }
+)";
+    // With 'idl' it is pure: callable anywhere, top level included.
+    CHECK(compile(decls + "let ix = with_idl();\nlet j: instruction = anchor_ix(k.pubkey, { method: \"go\", "
+                          "args: { n: 1 }, remaining_accounts: [readonly(k.pubkey)], idl: \"p.json\" });")
+              ->ok());
+    CHECK(compile(decls + "network n { genesis { let ix = from_genesis(); } scenario s { let ix = from_genesis(); } }")
+              ->ok());
+    auto top = compile(decls + "let ix = from_genesis();");
+    CHECK(
+        top->has("'from_genesis' reads network state and can only be called inside genesis, bootstrap or scenario", 4));
+    CHECK(top->has_note("'anchor_ix' reads network state here", 3));
+    CHECK(compile("let ix = anchor_ix(seed(\"k\").pubkey, { method: \"go\" });")
+              ->has("'anchor_ix' without 'idl' reads network state"));
+
+    auto keys =
+        compile(R"(let ix = anchor_ix(seed("k").pubkey, { metod: "go", signers: [seed("k")], idl: 5, accounts: 1 });)");
+    CHECK(keys->has("unknown field 'metod' in anchor_ix; did you mean 'method'?"));
+    CHECK(keys->has("'signers' describes a transaction, not an instruction"));
+    CHECK(keys->has("type mismatch in field 'idl' of anchor_ix: expected string, found int"));
+    CHECK(keys->has("type mismatch in field 'accounts' of anchor_ix"));
+    CHECK(keys->has("missing required field 'method' in anchor_ix"));
+    CHECK(compile("let ix = anchor_ix(seed(\"k\").pubkey, 1);")->has("expected an object, found int"));
+    CHECK(compile("let ix = anchor_ix(seed(\"k\"), { method: \"go\", idl: \"p.json\" });")
+              ->has("expected pubkey, found keypair"));
+}
+
 // --------------------------------------------------------------- imports --
 
 TEST_CASE("imports resolve module members and detect cycles", "[sema]") {

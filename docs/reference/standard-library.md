@@ -45,6 +45,10 @@ network:
 | State queries | `balance`, `token_balance`, `account_info`, `exists` | `genesis`, `bootstrap`, `scenario` | They need network state. In genesis they read the state built so far; at runtime they read the validator. |
 | Runtime only | `slot`, `epoch` | `bootstrap`, `scenario` | They need a running validator; genesis has no slot yet. |
 
+[`anchor_ix`](#anchor_ix) is pure when its record has an `idl` key. Without one
+it reads the IDL from the genesis `program` declaration, so it counts as a
+state query.
+
 Neither group may be used at top level or in `options` and `validator` blocks.
 Both may be used in a function body. The function then reads state (or needs a
 running network) too, and can only be called where the builtin is allowed:
@@ -302,6 +306,64 @@ not what the instruction needs.
 A `pubkey` converts implicitly to `account_meta` where one is expected. The
 full rules, including how signer flags are completed from `signers` and the
 fee payer, are in [account metas](../language/runtime.md#account-metas).
+An `account_meta`'s fields are read with `m.key`, `m.signer` and `m.writable`
+(see [`account_meta`](../language/types-and-values.md#account_meta)).
+
+## Instructions
+
+### anchor_ix
+
+```text
+anchor_ix(program: pubkey, { method, accounts, args, remaining_accounts, idl }) -> instruction
+```
+
+Builds an Anchor instruction from the program's IDL without sending it. The
+result is an [`instruction`](../language/types-and-values.md#instruction)
+value, which [`transaction`](../language/runtime.md#instruction-values) sends
+through its `instructions` key. `invoke` is the same construction followed by
+a send. For the same keys, `anchor_ix` produces the instruction `invoke` would
+send.
+
+The second argument is an object with the [`invoke` keys](../language/runtime.md#invoke-keys)
+that describe the instruction:
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `method` | `string` | required | Instruction name in the IDL. |
+| `accounts` | object | `{}` | `{ name: pubkey, ... }`, ordered and flagged as the IDL says. |
+| `args` | object | `{}` | `{ name: value, ... }`, encoded with the IDL argument types. |
+| `remaining_accounts` | `[account_meta]` | `[]` | Appended after the IDL accounts, with the flags they were written with. |
+| `idl` | `string` | the genesis program's `idl` | Path to an IDL JSON file. |
+
+The keys that describe a transaction (`signers`, `fee_payer`,
+`compute_unit_limit`) are rejected; set them on the `transaction` that sends
+the instruction. The keys are checked on the object's type, so an object built
+elsewhere is checked like a literal. Data, accounts, name matching and the
+runtime errors are the same as for [`invoke`](../language/runtime.md#invoke).
+
+```tide
+// lib/counter.tid
+fn increment(state: pubkey, authority: pubkey, by: u64) -> instruction {
+  return anchor_ix(COUNTER, {
+    method: "increment",
+    accounts: { state: state, authority: authority },
+    args: { by: by },
+    idl: "idl/counter.json",
+  });
+}
+```
+
+Where the IDL comes from decides where `anchor_ix` may be used:
+
+- With `idl`, it is pure and works in every context, top level included.
+- Without `idl`, the IDL comes from the genesis `program` declaration whose
+  `id` is `program`. That reads network state, so `anchor_ix` is allowed only
+  in `genesis`, `bootstrap` and `scenario`, and a function that calls it can
+  only be called there (see [where builtins may be used](#where-builtins-may-be-used)).
+  Outside those blocks the error is
+  `'anchor_ix' without 'idl' reads network state (the IDL of the program's genesis declaration) and can only be used inside genesis, bootstrap or scenario blocks; add 'idl: "..."' to use it elsewhere`.
+  When no genesis program has that id, the call fails at run time with
+  `no IDL known for program <id>; add 'idl = "...";' to its genesis program declaration or 'idl: "..."' to this anchor_ix`.
 
 ## State queries
 

@@ -1250,6 +1250,12 @@ struct Interpreter::Impl {
     static Value member_of(const Value& obj, const std::string& name, Loc loc) {
         if (obj.is<sol::Keypair>() && name == "pubkey") return Value(obj.as<sol::Keypair>().pubkey);
         if (obj.is<SourceV>() && name == "url") return Value(obj.as<SourceV>().url);
+        // An account_meta: a bare pubkey in an accounts list stands for writable(pubkey).
+        if ((obj.is<MetaV>() || obj.is<Pubkey>()) && (name == "key" || name == "signer" || name == "writable")) {
+            const MetaV m = obj.is<MetaV>() ? obj.as<MetaV>() : MetaV{obj.as<Pubkey>(), false, true};
+            if (name == "key") return Value(m.key);
+            return Value(name == "signer" ? m.signer : m.writable);
+        }
         if (obj.is<RecordP>()) {
             if (const Value* f = obj.as<RecordP>()->find(name)) return *f;
             fail(loc, "object has no field '" + name + "'");
@@ -1498,6 +1504,7 @@ struct Interpreter::Impl {
             case BuiltinId::spl_transfer: return Value(sol::spl_transfer_data(a.u64(0)));
             case BuiltinId::spl_mint_to: return Value(sol::spl_mint_to_data(a.u64(0)));
             case BuiltinId::spl_transfer_checked: return Value(sol::spl_transfer_checked_data(a.u64(0), a.u8(1)));
+            case BuiltinId::anchor_ix: return builtin_anchor_ix(a);
             case BuiltinId::balance: {
                 auto acc = query_account(a.pubkey(0));
                 return Value(static_cast<i128>(acc ? acc->lamports : 0));
@@ -2219,17 +2226,22 @@ struct Interpreter::Impl {
         return keys;
     }
 
-    sol::AccountMeta meta_of(const Value& v, const std::vector<sol::Keypair>& signers, const Pubkey& fee_payer,
-                             Loc loc) {
-        auto is_signer = [&](const Pubkey& p) {
-            return p == fee_payer || std::ranges::any_of(signers, [&](const sol::Keypair& s) { return s.pubkey == p; });
-        };
+    // An account meta as written: a bare pubkey is writable and not a signer.
+    sol::AccountMeta plain_meta(const Value& v, Loc loc) {
         if (v.is<MetaV>()) {
             const auto& m = v.as<MetaV>();
-            return {m.key, m.signer || is_signer(m.key), m.writable};
+            return {m.key, m.signer, m.writable};
         }
-        const Pubkey& p = to_pubkey(v, loc, "instruction account");
-        return {p, is_signer(p), true};
+        return {to_pubkey(v, loc, "instruction account"), false, true};
+    }
+
+    // An account meta as sent: a key that belongs to a signer or the fee payer signs.
+    sol::AccountMeta meta_of(const Value& v, const std::vector<sol::Keypair>& signers, const Pubkey& fee_payer,
+                             Loc loc) {
+        sol::AccountMeta m = plain_meta(v, loc);
+        m.is_signer = m.is_signer || m.pubkey == fee_payer ||
+                      std::ranges::any_of(signers, [&](const sol::Keypair& s) { return s.pubkey == m.pubkey; });
+        return m;
     }
 
     // Shared by `transaction` and `invoke`: the explicit fee payer, else the first signer.
@@ -2257,25 +2269,38 @@ struct Interpreter::Impl {
         return msg;
     }
 
+    // Instructions are sent in source order: `instruction` blocks and the
+    // entries of `instructions = [...]` where the key is written.
     void exec_transaction(const Stmt& s, const TransactionStmt& t) {
         backend::TransactionRequest req;
         req.origin = s.loc;
-        const std::optional<Pubkey> fee_payer = read_transaction_options(t, req);
+        Value listed;  // the checker allows at most one `instructions` key
+        const std::optional<Pubkey> fee_payer = read_transaction_options(t, req, listed);
         req.fee_payer = resolve_fee_payer(fee_payer, req.signers, s.loc, "transaction");
-        for (const auto& e : t.entries)
-            if (e.is_instruction) req.instructions.push_back(build_instruction(e, req));
+        for (const auto& e : t.entries) {
+            if (e.is_instruction) {
+                req.instructions.push_back(build_instruction(e, req));
+            } else if (e.key == "instructions") {
+                for (const auto& ix : *want<ListP>(listed, e.value->loc, "a list", "instructions"))
+                    req.instructions.push_back(instruction_of(ix, req, e.value->loc));
+            }
+        }
+        if (req.instructions.empty()) fail(s.loc, "transaction has no instructions");
         const backend::TxResult r = send(req, s.loc);
         finish_transaction(s, t, r);
     }
 
     // Applies the `key = value;` entries of a transaction to `req`; returns the
-    // explicit fee payer, if one is given.
-    std::optional<Pubkey> read_transaction_options(const TransactionStmt& t, backend::TransactionRequest& req) {
+    // explicit fee payer, if one is given. The `instructions` list goes to `listed`.
+    std::optional<Pubkey> read_transaction_options(const TransactionStmt& t, backend::TransactionRequest& req,
+                                                   Value& listed) {
         std::optional<Pubkey> fee_payer;
         for (const auto& e : t.entries) {
             if (e.is_instruction) continue;
             const Value v = eval(*e.value);
-            if (e.key == "fee_payer")
+            if (e.key == "instructions")
+                listed = v;
+            else if (e.key == "fee_payer")
                 fee_payer = to_pubkey(v, e.value->loc, "fee_payer");
             else if (e.key == "signers")
                 req.signers = keypairs_of(v, e.value->loc);
@@ -2306,6 +2331,17 @@ struct Interpreter::Impl {
         return ix;
     }
 
+    // An `instruction` value; signer flags come from the request's signers and fee payer.
+    sol::Instruction instruction_of(const Value& v, const backend::TransactionRequest& req, Loc loc) {
+        const Value rec = Value(want<RecordP>(v, loc, "an instruction", "entry of 'instructions'"));
+        sol::Instruction ix;
+        ix.program_id = to_pubkey(member_of(rec, "program", loc), loc, "instruction program");
+        for (const auto& a : *want<ListP>(member_of(rec, "accounts", loc), loc, "a list", "instruction accounts"))
+            ix.accounts.push_back(meta_of(a, req.signers, req.fee_payer, loc));
+        ix.data = Codec::to_bytes(member_of(rec, "data", loc), loc, "instruction data");
+        return ix;
+    }
+
     // A named transaction binds its result and never fails the statement; an
     // unnamed one fails it when the transaction failed.
     void finish_transaction(const Stmt& s, const TransactionStmt& t, const backend::TxResult& r) {
@@ -2327,13 +2363,13 @@ struct Interpreter::Impl {
         }
     }
 
+    // `anchor_ix` builds the instruction; `invoke` builds the same one and sends it.
     void exec_invoke(const Stmt& s, const InvokeStmt& inv) {
         const Pubkey program = to_pubkey(eval(*inv.program), inv.program->loc, "invoked program");
         const FieldVals f = eval_fields(inv.with.entries);
         const Loc loc = s.loc;
         const std::string method = to_str(f.require("method"), f.loc("method", loc), "method");
-        const IdlInstruction target = invoke_target(inv, program, method, f, loc);
-        Bytes data = encode_invoke_data(target, method, f, loc);
+        sol::Instruction instr = idl_instruction(program, inv.program->loc, method, f, loc, "to this invoke");
 
         std::vector<sol::Keypair> signers =
             f.get("signers") ? keypairs_of(*f.get("signers"), f.loc("signers", loc)) : std::vector<sol::Keypair>{};
@@ -2341,10 +2377,6 @@ struct Interpreter::Impl {
         if (const Value* fp = f.get("fee_payer")) explicit_payer = to_pubkey(*fp, f.loc("fee_payer", loc), "fee_payer");
         const Pubkey fee_payer = resolve_fee_payer(explicit_payer, signers, loc, "invoke");
 
-        sol::Instruction instr;
-        instr.program_id = program;
-        instr.data = std::move(data);
-        instr.accounts = invoke_accounts(target.ix, program, method, f, loc);
         if (const Value* rem = f.get("remaining_accounts"))
             for (const auto& a : *want<ListP>(*rem, f.loc("remaining_accounts", loc), "a list", "remaining_accounts"))
                 instr.accounts.push_back(meta_of(a, signers, fee_payer, f.loc("remaining_accounts", loc)));
@@ -2362,24 +2394,77 @@ struct Interpreter::Impl {
         out << "    invoked " << method << ": " << r.signature << "\n";
     }
 
+    // anchor_ix(program, { method, accounts, args, remaining_accounts, idl }): the
+    // instruction `invoke` would send, as a value. Remaining accounts keep the
+    // flags they were written with; signers are promoted when it is sent.
+    Value builtin_anchor_ix(const BuiltinArgs& a) {
+        const Pubkey program = a.pubkey(0);
+        const FieldVals f = fields_of(a, 1);
+        const Loc loc = a.loc(1);
+        const std::string method = to_str(f.require("method"), f.loc("method", loc), "method");
+        sol::Instruction ix = idl_instruction(program, a.loc(0), method, f, loc, "'idl: \"...\"' to this anchor_ix");
+        std::vector<Value> accounts;
+        accounts.reserve(ix.accounts.size());
+        for (const auto& m : ix.accounts) accounts.emplace_back(MetaV{m.pubkey, m.is_signer, m.is_writable});
+        if (const Value* rem = f.get("remaining_accounts"))
+            for (const auto& v : *want<ListP>(*rem, f.loc("remaining_accounts", loc), "a list", "remaining_accounts")) {
+                const sol::AccountMeta m = plain_meta(v, f.loc("remaining_accounts", loc));
+                accounts.emplace_back(MetaV{m.pubkey, m.is_signer, m.is_writable});
+            }
+        f.check_all_read("anchor_ix");
+        return make_record({{"program", Value(program)},
+                            {"accounts", make_list(std::move(accounts))},
+                            {"data", Value(std::move(ix.data))}});
+    }
+
+    // The fields of a record argument, each positioned at its value when the argument is an object literal.
+    FieldVals fields_of(const BuiltinArgs& a, std::size_t i) {
+        const auto& rec = *want<RecordP>(a[i], a.loc(i), "an object", a.what(i));
+        const auto* lit = a.call.args[i]->as<ObjectLit>();
+        FieldVals fv;
+        for (const auto& [n, v] : rec.fields) {
+            Loc l = a.loc(i);
+            if (lit)
+                for (const auto& field : lit->fields)
+                    if (field.key == n) l = field.value->loc;
+            fv.values[n] = {v, l};
+        }
+        return fv;
+    }
+
+    // Instruction `method` of a program's IDL: the discriminator and the IDL
+    // arguments from `args`, then the IDL accounts from `accounts`.
+    // `remaining_accounts` are left to the caller. `idl_where` completes the
+    // hint shown when no IDL is known.
+    sol::Instruction idl_instruction(const Pubkey& program, Loc program_loc, const std::string& method,
+                                     const FieldVals& f, Loc loc, std::string_view idl_where) {
+        const IdlInstruction target = invoke_target(program, program_loc, method, f, loc, idl_where);
+        sol::Instruction ix;
+        ix.program_id = program;
+        ix.data = encode_invoke_data(target, method, f, loc);
+        ix.accounts = invoke_accounts(target.ix, program, method, f, loc);
+        return ix;
+    }
+
     // An instruction found in an IDL, with the IDL that defines its argument types.
     struct IdlInstruction {
         const Json& idl;
         const Json& ix;
     };
 
-    // Instruction `method` of the invoke's IDL: its own `idl` field, else the
-    // IDL its program declared in genesis. The last same_name match wins.
-    IdlInstruction invoke_target(const InvokeStmt& inv, const Pubkey& program, const std::string& method,
-                                 const FieldVals& f, Loc loc) {
+    // Instruction `method` of the IDL given by the `idl` field, else the IDL
+    // its program declared in genesis. The last same_name match wins.
+    IdlInstruction invoke_target(const Pubkey& program, Loc program_loc, const std::string& method, const FieldVals& f,
+                                 Loc loc, std::string_view idl_where) {
         std::filesystem::path idl_path;
         if (const Value* p = f.get("idl"))
             idl_path = resolve_path(to_str(*p, f.loc("idl", loc), "idl"));
         else if (auto it = ledger.program_idls.find(program); it != ledger.program_idls.end())
             idl_path = it->second;
         else
-            fail(inv.program->loc, "no IDL known for program " + program.base58() +
-                                       "; add 'idl = \"...\";' to its genesis program declaration or to this invoke");
+            fail(program_loc, "no IDL known for program " + program.base58() +
+                                  "; add 'idl = \"...\";' to its genesis program declaration or " +
+                                  std::string(idl_where));
         const Json& idl = load_idl(idl_path, loc);
 
         const Json* ix = nullptr;

@@ -108,6 +108,8 @@ enum class BuiltinId : std::uint8_t {
     spl_transfer_checked,
     spl_mint_to,
     memo,
+    // instructions
+    anchor_ix,
     // state queries
     balance,
     token_balance,

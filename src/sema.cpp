@@ -128,6 +128,12 @@ TypeContext::TypeContext() {
                          {"error", string_},
                          {"logs", list(string_)},
                          {"slot", int_(IntWidth::u64)}});
+    {
+        Type ix{TypeKind::record};
+        ix.fields = {{"program", pubkey_}, {"accounts", list(meta_)}, {"data", bytes_}};
+        ix.type_name = "instruction";
+        instruction_ = make(std::move(ix));
+    }
 }
 
 const Type* TypeContext::make(Type t) {
@@ -228,6 +234,7 @@ std::string to_string(const Type* t) {
         case TypeKind::option: return "Option<" + to_string(t->elem) + ">";
         case TypeKind::record: {
             if (t->schema) return t->schema->name;
+            if (!t->type_name.empty()) return std::string(t->type_name);
             std::string s = "{";
             for (std::size_t i = 0; i < t->fields.size(); ++i)
                 s += ((i != 0U) ? ", " : "") + t->fields[i].first + ": " + to_string(t->fields[i].second);
@@ -333,6 +340,7 @@ constexpr auto builtin_table = std::to_array<BuiltinDef>({
     {"spl_transfer_checked", BuiltinId::spl_transfer_checked, pure},
     {"spl_mint_to", BuiltinId::spl_mint_to, pure},
     {"memo", BuiltinId::memo, pure},
+    {"anchor_ix", BuiltinId::anchor_ix, pure},  // a read without 'idl': see check_anchor_ix
     {"balance", BuiltinId::balance, Op::read},
     {"token_balance", BuiltinId::token_balance, Op::read},
     {"account_info", BuiltinId::account, Op::read},
@@ -382,6 +390,7 @@ enum class Ty : std::uint8_t {
     list_pubkey,
     list_keypair,
     list_meta,
+    list_instruction,
     record,
 };
 
@@ -530,6 +539,7 @@ constexpr auto tx_fields = std::to_array<FieldSpec>({
     {"signers", Ty::list_keypair},
     {"compute_unit_limit", Ty::u32},
     {"compute_unit_price", Ty::u64},
+    {"instructions", Ty::list_instruction},
 });
 constexpr auto instruction_fields = std::to_array<FieldSpec>({{"accounts", Ty::list_meta}, {"data", Ty::bytes}});
 constexpr auto invoke_fields = std::to_array<FieldSpec>({
@@ -541,6 +551,14 @@ constexpr auto invoke_fields = std::to_array<FieldSpec>({
     {"idl", Ty::string},
     {"compute_unit_limit", Ty::u32},
     {"remaining_accounts", Ty::list_meta},
+});
+// The invoke keys that describe the instruction; the others describe its transaction.
+constexpr auto anchor_ix_fields = std::to_array<FieldSpec>({
+    {"method", Ty::string, true},
+    {"accounts", Ty::record},
+    {"args", Ty::record},
+    {"remaining_accounts", Ty::list_meta},
+    {"idl", Ty::string},
 });
 
 struct Scope {
@@ -1016,6 +1034,7 @@ private:
             {"source", &TypeContext::source, false},
             {"range", &TypeContext::range, false},
             {"account_meta", &TypeContext::account_meta, false},
+            {"instruction", &TypeContext::instruction, false},
         });
         for (const auto& n : named)
             if (n.name == name) return &n;
@@ -1056,10 +1075,10 @@ private:
     }
 
     void report_unknown_type(const TypeExpr& t) {
-        std::vector<std::string> candidates = {"int",      "u8",     "u16",          "u32",    "u64",     "u128",
-                                               "i8",       "i16",    "i32",          "i64",    "i128",    "bool",
-                                               "float",    "string", "bytes",        "pubkey", "keypair", "source",
-                                               "duration", "range",  "account_meta", "Option"};
+        std::vector<std::string> candidates = {"int",      "u8",     "u16",          "u32",    "u64",        "u128",
+                                               "i8",       "i16",    "i32",          "i64",    "i128",       "bool",
+                                               "float",    "string", "bytes",        "pubkey", "keypair",    "source",
+                                               "duration", "range",  "account_meta", "Option", "instruction"};
         for (Scope* s = scope_; s; s = s->parent)
             for (const auto& [n, sym] : s->names)
                 if (sym->kind == SymbolKind::schema) candidates.push_back(n);
@@ -1515,6 +1534,10 @@ private:
             case TypeKind::source:
                 if (name == "url") return types_.string();
                 return no_member({"url"});
+            case TypeKind::account_meta:
+                if (name == "key") return types_.pubkey();
+                if (name == "signer" || name == "writable") return types_.bool_();
+                return no_member({"key", "signer", "writable"});
             case TypeKind::record: {
                 if (const Type* f = rec->field(name)) return f;
                 std::vector<std::string> names;
@@ -1781,6 +1804,54 @@ private:
         return types_.bytes();
     }
 
+    // anchor_ix(program, { method, accounts, args, remaining_accounts, idl }): the keys are checked
+    // on the record's type, so a record built elsewhere is checked like a literal. Without 'idl'
+    // the IDL comes from the program's genesis declaration, which makes the call a read.
+    const Type* check_anchor_ix(Expr& e, CallExpr& c, const BuiltinDef& b) {
+        if (!arity(e, c, b, 2, 2)) return types_.instruction();
+        expect(*c.args[0], types_.pubkey(), arg_desc(b, 0) + " (program id)");
+        Expr& arg = *c.args[1];
+        const Type* t = value_type(arg, arg_desc(b, 1));
+        if (is_err(t)) return types_.instruction();
+        if (t->kind != TypeKind::record || t->schema) {
+            diags_.error(arg.loc, "type mismatch in " + arg_desc(b, 1) + ": expected an object, found " + to_string(t));
+            return types_.instruction();
+        }
+        for (const auto& [n, ft] : t->fields) check_anchor_ix_field(arg, n, ft);
+        if (t->field("method") == nullptr) diags_.error(arg.loc, "missing required field 'method' in anchor_ix");
+        if (t->field("idl") == nullptr && !record_op(Op::read, e.loc, "anchor_ix") && !op_allowed(Op::read, ctx_))
+            diags_.error(e.loc,
+                         "'anchor_ix' without 'idl' reads network state (the IDL of the program's genesis "
+                         "declaration) and can only be used inside genesis, bootstrap or scenario blocks; add "
+                         "'idl: \"...\"' to use it elsewhere");
+        return types_.instruction();
+    }
+
+    // Field `n` of type `ft` in the record argument `arg` of anchor_ix; errors
+    // point at the field when `arg` is an object literal.
+    void check_anchor_ix_field(const Expr& arg, const std::string& n, const Type* ft) {
+        Loc at = arg.loc;
+        if (const auto* lit = arg.as<ObjectLit>())
+            for (const auto& f : lit->fields)
+                if (f.key == n) at = f.loc;
+        const auto* const spec = std::ranges::find(anchor_ix_fields, n, &FieldSpec::name);
+        if (spec != anchor_ix_fields.end()) {
+            const Type* want = spec_type(spec->type);
+            if (!is_err(ft) && !assignable(ft, want))
+                diags_.error(at, "type mismatch in field '" + n + "' of anchor_ix: expected " + to_string(want) +
+                                     ", found " + to_string(ft));
+        } else if (n == "signers" || n == "fee_payer" || n == "compute_unit_limit") {
+            diags_.error(at, "'" + n +
+                                 "' describes a transaction, not an instruction: set it on the 'transaction' that "
+                                 "sends this instruction");
+        } else {
+            std::vector<std::string> names;
+            names.reserve(anchor_ix_fields.size());
+            for (const auto& f : anchor_ix_fields) names.emplace_back(f.name);
+            diags_.error(at, "unknown field '" + n + "' in anchor_ix" + suggest(n, names));
+        }
+    }
+
     const Type* check_builtin(Expr& e, CallExpr& c, const BuiltinDef& b) {
         check_builtin_op(e, b);
         auto unary = [&](const Type* param, const Type* ret) {
@@ -1859,6 +1930,7 @@ private:
             case BuiltinId::spl_mint_to: return unary(types_.int_(IntWidth::u64), types_.bytes());
             case BuiltinId::spl_transfer_checked: return check_spl_transfer_checked(e, c, b);
             case BuiltinId::memo: return unary(types_.string(), types_.bytes());
+            case BuiltinId::anchor_ix: return check_anchor_ix(e, c, b);
             case BuiltinId::balance:
             case BuiltinId::token_balance: return unary(types_.pubkey(), types_.int_());
             case BuiltinId::account: return unary(types_.pubkey(), types_.option(types_.account_info()));
@@ -2275,6 +2347,7 @@ private:
                 continue;
             }
             expect(*e.value, spec_type(spec->type), "transaction field '" + e.key + "'");
+            if (e.key == "instructions") ++instructions;
         }
         if (instructions == 0) diags_.error(s.loc, "transaction has no instructions");
         if (t.binding) {
@@ -2305,6 +2378,7 @@ private:
             case Ty::list_pubkey: return types_.list(types_.pubkey());
             case Ty::list_keypair: return types_.list(types_.keypair());
             case Ty::list_meta: return types_.list(types_.account_meta());
+            case Ty::list_instruction: return types_.list(types_.instruction());
             case Ty::record: return types_.record({});
         }
         return types_.any();
