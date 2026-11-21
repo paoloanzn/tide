@@ -66,6 +66,7 @@ struct Type {
     std::vector<const Type*> elems;                           // tuple
     const struct Symbol* schema = nullptr;                    // schema; record decoded from a schema
     const struct Module* module = nullptr;                    // module
+    std::string_view type_name;                               // record: the name of a built-in shape
 
     [[nodiscard]] const Type* field(std::string_view name) const {
         for (const auto& [n, t] : fields)
@@ -107,12 +108,13 @@ public:
     // Record shapes produced by the standard library.
     [[nodiscard]] const Type* account_info() const { return account_info_; }
     [[nodiscard]] const Type* tx_result() const { return tx_result_; }
+    [[nodiscard]] const Type* instruction() const { return instruction_; }
 
 private:
     const Type* make(Type t);
     std::deque<Type> arena_;
     const Type *error_, *any_, *float32_, *void_t_, *null_, *bool_t_, *float_t_, *string_, *bytes_, *duration_,
-        *pubkey_, *keypair_, *source_, *range_, *meta_, *account_info_, *tx_result_;
+        *pubkey_, *keypair_, *source_, *range_, *meta_, *account_info_, *tx_result_, *instruction_;
     std::array<const Type*, std::size(all_int_widths)> ints_{};
 };
 

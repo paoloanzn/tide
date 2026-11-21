@@ -31,7 +31,8 @@ be omitted: a `let` variable takes the type of its initializer.
 | `Option<T>` | `null` or a `T` | `null` | |
 | object types | records with named fields | `{ name: "a", n: 1 }` | no annotation syntax |
 | `(T, U, ...)` | tuples | `[1, true]` | schema fields only |
-| `account_meta` | an account reference for an instruction | (none; use `readonly(pk)` etc.) | |
+| `account_meta` | an account reference for an instruction | (none; use `readonly(pk)` etc.) | has `.key`, `.signer`, `.writable` |
+| `instruction` | an instruction, built but not sent | `{ program: pk, accounts: [...], data: ... }` | a record type, see [`instruction`](#instruction) |
 | schema names | records described by a `schema` | `{ ... }` | see [Schemas](schemas.md) |
 
 The builtins mentioned in this table are documented in the
@@ -372,7 +373,8 @@ An object literal `{ key: value, ... }` creates a record. Keys are identifiers
 type of `{ name: "a", amount: 1 }` is written `{name: string, amount: int}` in
 diagnostics.
 
-There is no syntax for writing an object type in an annotation. Record types
+There is no syntax for writing an object type in an annotation; the one
+exception is the built-in name [`instruction`](#instruction). Record types
 come from object literals, from [schemas](schemas.md) and from builtins:
 
 | Source | Record type |
@@ -380,6 +382,7 @@ come from object literals, from [schemas](schemas.md) and from builtins:
 | `account_info(pk)` | `Option<{address: pubkey, lamports: u64, owner: pubkey, data: bytes, executable: bool, rent_epoch: u64}>` |
 | `transaction as tx { ... }` | `tx : {success: bool, signature: string, error: string, logs: [string], slot: u64}` (see [Runtime](runtime.md)) |
 | `decode(Schema, bytes)` | the schema's record type |
+| `anchor_ix(program, { ... })` | `instruction` |
 
 Two object types are compatible when they have the same field names (in any
 order) with compatible field types. Fields are read with `obj.field` and, on a
@@ -401,6 +404,50 @@ implicitly to `account_meta`, which is what lets an instruction's `accounts`
 list mix bare pubkeys and explicit metas; the flags a bare pubkey gets are
 described in [Runtime](runtime.md).
 
+Its fields can be read:
+
+| Field | Type | Value |
+|---|---|---|
+| `key` | `pubkey` | the account's pubkey |
+| `signer` | `bool` | `true` for `signer(...)`; `false` for `readonly(...)`, `writable(...)` and a bare pubkey |
+| `writable` | `bool` | `false` for `readonly(...)` and `signer(pk, false)`; `true` otherwise, a bare pubkey included |
+
+The fields report what was written. A key that belongs to a transaction signer
+is promoted to a signer only when the instruction is sent (see
+[account metas](runtime.md#account-metas)), so `m.signer` can be `false` for an
+account that ends up signing.
+
+## `instruction`
+
+`instruction` is a built-in name for this record type:
+
+```text
+{ program: pubkey, accounts: [account_meta], data: bytes }
+```
+
+It compares structurally like any other record type: an object literal with
+these three fields is an `instruction`, and a bare pubkey in `accounts`
+converts to an `account_meta` as usual. An instruction value is only data.
+Building one sends nothing; [`transaction`](runtime.md#instruction-values)
+sends it through its `instructions` key. Instructions can be returned from
+functions, stored in lists and passed as arguments, and their fields can be
+read like those of any record.
+
+```tide
+fn pay(from: pubkey, to: pubkey, lamports: u64) -> instruction {
+  return { program: system_program(), accounts: [from, to], data: system_transfer(lamports) };
+}
+
+fn programs(ixs: [instruction]) -> [pubkey] {
+  let out: [pubkey] = [];
+  for ix in ixs { out = out + [ix.program]; }
+  return out;
+}
+```
+
+For Anchor programs, [`anchor_ix`](../reference/standard-library.md#anchor_ix)
+builds the instruction from the program's IDL.
+
 ## Schema types
 
 A `schema` declaration names a record layout. The schema name can be used as a
@@ -410,8 +457,8 @@ nominal: two schemas with identical fields are still different types. Schemas
 and their encodings are covered in [Schemas](schemas.md).
 
 Schema fields need types with a binary encoding: `int` must be a sized type,
-and `duration`, `keypair`, `source`, `range` and `account_meta` are not
-allowed.
+and `duration`, `keypair`, `source`, `range`, `account_meta` and
+`instruction` are not allowed.
 
 ## Implicit conversions
 
