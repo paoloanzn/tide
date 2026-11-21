@@ -1,6 +1,6 @@
 # Tide documentation
 
-This is the documentation for Tide v0.1.0, a language for describing local
+This is the documentation for Tide v0.2.0, a language for describing local
 Solana networks as code. If you have not used Tide before, read the
 [project README](../README.md) first. It shows a complete script and how a
 run works in a few minutes.

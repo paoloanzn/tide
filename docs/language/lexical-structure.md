@@ -82,7 +82,7 @@ extension
 ```
 
 `warp`, `snapshot` and `restore` are reserved for a future version. They parse,
-but the checker always rejects them in v0.1.0.
+but the checker always rejects them in v0.2.0.
 
 Using a reserved word as a name is a syntax error:
 

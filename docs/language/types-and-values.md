@@ -133,7 +133,7 @@ arithmetic is preferred everywhere else because it is exact.
 - An `int` converts implicitly to `float` (`let f: float = n;`), and an integer
   literal in a float context is a float literal (`let f: float = 1;`).
 - A `float` never converts implicitly to an `int`. There is no truncating
-  conversion builtin in v0.1.0; use `sol(n)` to turn a SOL amount into lamports.
+  conversion builtin in v0.2.0; use `sol(n)` to turn a SOL amount into lamports.
 - Mixing `int` and `float` in arithmetic produces a `float`: `1 + 2.5` is `3.5`.
 - Float division by zero is an error, like integer division.
 
@@ -346,7 +346,7 @@ or an optional schema field.
   `Option<{lamports: u64, ...}>`, then `info.lamports` has type `u64`. If `info`
   is `null` at runtime, the access fails with `cannot read member 'lamports' of
   null`. Check `info != null` first.
-- There is no unwrap operator in v0.1.0. An `Option<int>` cannot be used where
+- There is no unwrap operator in v0.2.0. An `Option<int>` cannot be used where
   an `int` is expected, and operators do not apply to it:
 
   ```text

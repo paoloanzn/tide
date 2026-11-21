@@ -176,7 +176,7 @@ nothing and needs no validator. It catches:
 - constant values that do not fit (fractional lamports, out-of-range literals),
 - malformed literal arguments, such as an invalid base58 string in `pubkey("...")`,
 - reserved features: `warp`, `snapshot` and `restore` parse but are always
-  rejected in v0.1.0.
+  rejected in v0.2.0.
 
 `tide up` runs the script, so it also catches errors that depend on computed
 values or on a live validator:
@@ -204,7 +204,7 @@ and data; programs; token accounts; transactions. It does not mention
 validator flags, ledger directories or RPC calls. A *backend* turns that
 description into a running network.
 
-Tide v0.1.0 ships one backend, built on Agave's `solana-test-validator`. It
+Tide v0.2.0 ships one backend, built on Agave's `solana-test-validator`. It
 writes genesis accounts as JSON files loaded with `--account-dir`, maps
 `options` and `validator` fields to validator flags, and sends runtime
 actions over JSON-RPC. It also has limits that come from the validator, for

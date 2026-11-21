@@ -5,7 +5,7 @@
 #
 # Running it again updates Tide to the latest release. Environment variables:
 #
-#   TIDE_VERSION       release to install, e.g. v0.1.0 (default: the latest release)
+#   TIDE_VERSION       release to install, e.g. v0.2.0 (default: the latest release)
 #   TIDE_INSTALL_DIR   directory for the tide binary (default: $HOME/.local/bin)
 #   TIDE_FORCE=1       reinstall even when that version is already installed
 #   TIDE_RELEASES_URL  where releases are downloaded from (default: GitHub; for mirrors and testing)

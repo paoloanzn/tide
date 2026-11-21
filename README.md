@@ -6,7 +6,7 @@ starts, how the validator is configured, and which transactions and checks to
 run against it. The `tide` command reads the script, builds that state, and
 launches a `solana-test-validator` from it.
 
-This is version 0.1.0.
+This is version 0.2.0.
 
 ## Why Tide
 
@@ -75,14 +75,14 @@ The script reads these environment variables:
 
 | Variable | Effect |
 |---|---|
-| `TIDE_VERSION` | Install this release instead of the latest, e.g. `v0.1.0`. |
+| `TIDE_VERSION` | Install this release instead of the latest, e.g. `v0.2.0`. |
 | `TIDE_INSTALL_DIR` | Install into this directory instead of `~/.local/bin`. |
 | `TIDE_FORCE=1` | Reinstall even when that version is already installed. |
 
 Set them on the `sh` side of the pipe:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/paoloanzn/tide/main/install.sh | TIDE_VERSION=v0.1.0 sh
+curl -fsSL https://raw.githubusercontent.com/paoloanzn/tide/main/install.sh | TIDE_VERSION=v0.2.0 sh
 ```
 
 `tide up` also needs `solana-test-validator`, which comes with the

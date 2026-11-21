@@ -2,7 +2,7 @@
 
 Tide has no import-able standard library modules. Instead, the checker knows a
 fixed set of builtin functions, available everywhere without a declaration.
-This page lists every builtin in Tide v0.1.0, grouped by purpose, with its
+This page lists every builtin in Tide v0.2.0, grouped by purpose, with its
 signature, result, errors and where it may be used.
 
 ## Reading the signatures

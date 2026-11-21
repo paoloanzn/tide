@@ -80,7 +80,7 @@ Pass the same `--network` and `--state-dir` as for `tide up`. See
 | Invocation | Output | Exit code |
 |------------|--------|-----------|
 | `tide --help`, `tide -h`, `tide help` | usage text on stdout | 0 |
-| `tide --version`, `tide version` | `tide 0.1.0` on stdout | 0 |
+| `tide --version`, `tide version` | `tide 0.2.0` on stdout | 0 |
 
 These are recognised only as the first argument. `tide check net.tid --help`
 is an unknown option (exit code 2).

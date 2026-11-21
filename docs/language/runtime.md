@@ -380,7 +380,7 @@ The closing `;` after the block is required.
 | `remaining_accounts` | `[account_meta]` | `[]` | Appended after the IDL accounts, using the [account meta rules](#account-metas) of `transaction`. |
 | `idl` | `string` | the genesis program's `idl` | Path to an IDL JSON file, relative to the root script's directory. |
 
-`compute_unit_price` is not an `invoke` key in v0.1.0; use `transaction` if
+`compute_unit_price` is not an `invoke` key in v0.2.0; use `transaction` if
 you need a priority fee.
 
 ```tide
@@ -567,7 +567,7 @@ reported as, for example,
 
 The statements `warp to slot|epoch|time <expr>;`, `warp by slots <expr>;`,
 `snapshot "<name>";` and `restore "<name>";` are parsed, but they are reserved for
-a future version of Tide. In v0.1.0 the checker always rejects them inside
+a future version of Tide. In v0.2.0 the checker always rejects them inside
 `bootstrap` and `scenario` (and, like other runtime statements, anywhere
 else):
 

@@ -3,7 +3,7 @@
 Tide's interpreter does not start validators or speak JSON-RPC itself. It
 describes the network in Solana terms (accounts, programs, features,
 instructions) and hands that description to a **backend**, which turns it into
-a real network. Tide v0.1.0 ships one backend, built on Agave's
+a real network. Tide v0.2.0 ships one backend, built on Agave's
 `solana-test-validator`. The interface between the two is described in
 [architecture](../contributing/architecture.md).
 
